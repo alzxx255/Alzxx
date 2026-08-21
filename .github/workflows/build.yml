@@ -1,34 +1,4 @@
-name: Build Flutter
-
-on:
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Release tag yang berisi source ZIP"
-        required: true
-        type: string
-      build_type:
-        description: "release atau debug"
-        required: false
-        default: "release"
-        type: string
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          cache: true
-
-      - name: Download source ZIP from Release
+- name: Download source ZIP from Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -37,20 +7,30 @@ jobs:
             --repo "${{ github.repository }}" \
             --pattern "*.zip" \
             --dir source
+
           cd source
           unzip -o *.zip
-          # Cari folder yang ada pubspec.yaml
-          if [ -f pubspec.yaml ]; then
-            echo "PROJECT_ROOT=." >> $GITHUB_ENV
-          else
-            ROOT=$(find . -name pubspec.yaml | head -1 | xargs dirname)
-            echo "PROJECT_ROOT=$ROOT" >> $GITHUB_ENV
+
+          echo "=== Isi setelah unzip ==="
+          find . -maxdepth 3 -type f -name "pubspec.yaml" || true
+          ls -la
+
+          # Cari pubspec.yaml di mana pun
+          PUBSPEC=$(find . -name "pubspec.yaml" | head -1)
+          if [ -z "$PUBSPEC" ]; then
+            echo "ERROR: pubspec.yaml tidak ditemukan!"
+            exit 1
           fi
-          echo "Project root: $PROJECT_ROOT"
+
+          ROOT=$(dirname "$PUBSPEC")
+          echo "PROJECT_ROOT=$ROOT" >> $GITHUB_ENV
+          echo "Ketemu project di: $ROOT"
 
       - name: Flutter pub get
         run: |
           cd "${{ env.PROJECT_ROOT }}"
+          echo "Sekarang di: $(pwd)"
+          ls -la
           flutter pub get
 
       - name: Build APK
@@ -61,11 +41,3 @@ jobs:
           else
             flutter build apk --release
           fi
-
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-release
-          path: "**/build/app/outputs/flutter-apk/*.apk"
-          if-no-files-found: error
-          retention-days: 3
