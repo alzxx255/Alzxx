@@ -4,11 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (contoh: v1.0.0)'
+        description: "Release tag (contoh: v1.0.0)"
         required: true
         type: string
+
       build_type:
-        description: 'Jenis Build'
+        description: "Jenis Build"
         required: true
         type: choice
         options:
@@ -19,74 +20,139 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Install GitHub CLI
         run: |
           sudo apt-get update
-          sudo apt-get install -y gh
+          sudo apt-get install -y gh unzip
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
+          flutter-version: "3.43.3"
           channel: stable
+          cache: true
+
+      - name: Check Flutter environment
+        run: |
+          flutter --version
+          dart --version
+          flutter doctor -v
 
       - name: Download source ZIP from Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -e
+
           mkdir -p source
           cd source
-          
+
           gh release download "${{ inputs.tag }}" \
             --repo "${{ github.repository }}" \
             --pattern "*.zip" \
             --clobber
 
-          unzip -o *.zip || true
+          ZIP_FILE=$(find . -maxdepth 1 -type f -name "*.zip" | head -1)
 
-          PUBSPEC=$(find . -not -path "*/build/*" -not -path "*/.git/*" -name "pubspec.yaml" | head -1)
-          
+          if [ -z "$ZIP_FILE" ]; then
+            echo "❌ ERROR: ZIP project tidak ditemukan."
+            exit 1
+          fi
+
+          echo "📦 ZIP: $ZIP_FILE"
+
+          unzip -o "$ZIP_FILE"
+
+          PUBSPEC=$(find . \
+            -not -path "*/build/*" \
+            -not -path "*/.git/*" \
+            -name "pubspec.yaml" \
+            | head -1)
+
           if [ -z "$PUBSPEC" ]; then
-            echo "❌ ERROR: pubspec.yaml TIDAK DITEMUKAN!"
+            echo "❌ ERROR: pubspec.yaml tidak ditemukan."
             exit 1
           fi
 
           ROOT=$(dirname "$PUBSPEC")
-          ABS_ROOT="$(pwd)/$ROOT"
-          echo "PROJECT_ROOT=$ABS_ROOT" >> $GITHUB_ENV
+          ABS_ROOT="$(cd "$ROOT" && pwd)"
 
-      # ✅ PERBAIKI GRADLE VERSI & DSL
-      - name: Fix Gradle & AGP Compatibility
+          echo "PROJECT_ROOT=$ABS_ROOT" >> "$GITHUB_ENV"
+
+          echo "✅ Flutter project ditemukan:"
+          echo "$ABS_ROOT"
+
+      - name: Show project information
         run: |
-          cd "${{ env.PROJECT_ROOT }}/android"
-          
-          # Upgrade Gradle ke 8.14.0
-          sed -i 's/gradle-8\.[0-9]*\.[0-9]*/gradle-8.14.0/g' gradle/wrapper/gradle-wrapper.properties
-          
-          # Disable new DSL untuk kompatibilitas Flutter
-          echo "android.newDsl=false" >> gradle.properties
-          
-          echo "✅ Gradle & DSL fixed!"
+          cd "${{ env.PROJECT_ROOT }}"
 
-      - name: Flutter pub get
+          echo "======================================"
+          echo "PROJECT"
+          echo "======================================"
+
+          pwd
+          echo
+
+          echo "PUBSPEC:"
+          grep -E "^(name:|version:)" pubspec.yaml || true
+
+          echo
+          echo "FONT AWESOME:"
+          grep -n "font_awesome_flutter" pubspec.yaml || true
+
+      - name: Flutter Clean
+        run: |
+          cd "${{ env.PROJECT_ROOT }}"
+          flutter clean
+
+      - name: Flutter Pub Get
         run: |
           cd "${{ env.PROJECT_ROOT }}"
           flutter pub get
 
-      # ✅ Pakai flag untuk melewati validasi
-      - name: Build APK
+      - name: Analyze dependencies
         run: |
           cd "${{ env.PROJECT_ROOT }}"
+          flutter pub deps --style=compact
+
+      - name: Build APK
+        run: |
+          set -o pipefail
+
+          cd "${{ env.PROJECT_ROOT }}"
+
+          mkdir -p build_logs
+
           if [ "${{ inputs.build_type }}" = "debug" ]; then
-            flutter build apk --debug --android-skip-build-dependency-validation
+            flutter build apk \
+              --debug \
+              --verbose \
+              2>&1 | tee build_logs/flutter-build.log
           else
-            flutter build apk --release --android-skip-build-dependency-validation
+            flutter build apk \
+              --release \
+              --verbose \
+              2>&1 | tee build_logs/flutter-build.log
           fi
 
-      - name: Upload APK artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-${{ inputs.build_type }}.apk
+          name: app-${{ inputs.build_type }}
           path: |
             ${{ env.PROJECT_ROOT }}/build/app/outputs/flutter-apk/*.apk
           if-no-files-found: error
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ inputs.build_type }}
+          path: |
+            ${{ env.PROJECT_ROOT }}/build_logs/flutter-build.log
+          if-no-files-found: ignore
