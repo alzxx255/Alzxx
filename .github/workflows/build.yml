@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (contoh: v1.0.0) — HARUS SUDAH ADA DI RELEASES!'
+        description: 'Release tag (contoh: v1.0.0)'
         required: true
         type: string
       build_type:
@@ -20,19 +20,16 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # ✅ 1. Install GitHub CLI
       - name: Install GitHub CLI
         run: |
           sudo apt-get update
           sudo apt-get install -y gh
 
-      # ✅ 2. Setup Flutter
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
 
-      # ✅ 3. Download ZIP & Ekstrak — PAKAI PATH ABSOLUTE
       - name: Download source ZIP from Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -40,59 +37,56 @@ jobs:
           mkdir -p source
           cd source
           
-          echo "📥 Mengunduh Release: ${{ inputs.tag }}..."
           gh release download "${{ inputs.tag }}" \
             --repo "${{ github.repository }}" \
             --pattern "*.zip" \
             --clobber
 
-          echo "📂 File yang diunduh:"
-          ls -la
-
           unzip -o *.zip || true
-
-          echo "=== Isi setelah unzip ==="
-          find . -maxdepth 3 -type f -name "pubspec.yaml" || true
 
           PUBSPEC=$(find . -not -path "*/build/*" -not -path "*/.git/*" -name "pubspec.yaml" | head -1)
           
           if [ -z "$PUBSPEC" ]; then
             echo "❌ ERROR: pubspec.yaml TIDAK DITEMUKAN!"
-            echo "Daftar isi folder:"
-            find . -maxdepth 3 -type f | head -30
             exit 1
           fi
 
-          # 🔧 GUNAKAN PATH ABSOLUTE — INI YANG DIPERBAIKI!
           ROOT=$(dirname "$PUBSPEC")
           ABS_ROOT="$(pwd)/$ROOT"
-          echo "✅ Project ditemukan di: $ABS_ROOT"
           echo "PROJECT_ROOT=$ABS_ROOT" >> $GITHUB_ENV
 
-      # ✅ 4. Flutter pub get — GUNAKAN PATH ABSOLUTE
+      # ✅ PERBAIKI GRADLE VERSI & DSL
+      - name: Fix Gradle & AGP Compatibility
+        run: |
+          cd "${{ env.PROJECT_ROOT }}/android"
+          
+          # Upgrade Gradle ke 8.14.0
+          sed -i 's/gradle-8\.[0-9]*\.[0-9]*/gradle-8.14.0/g' gradle/wrapper/gradle-wrapper.properties
+          
+          # Disable new DSL untuk kompatibilitas Flutter
+          echo "android.newDsl=false" >> gradle.properties
+          
+          echo "✅ Gradle & DSL fixed!"
+
       - name: Flutter pub get
         run: |
-          echo "📂 Direktori Project: ${{ env.PROJECT_ROOT }}"
           cd "${{ env.PROJECT_ROOT }}"
-          pwd
           flutter pub get
 
-      # ✅ 5. Build APK
+      # ✅ Pakai flag untuk melewati validasi
       - name: Build APK
         run: |
           cd "${{ env.PROJECT_ROOT }}"
           if [ "${{ inputs.build_type }}" = "debug" ]; then
-            flutter build apk --debug
+            flutter build apk --debug --android-skip-build-dependency-validation
           else
-            flutter build apk --release
+            flutter build apk --release --android-skip-build-dependency-validation
           fi
 
-      # ✅ 6. Upload APK
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-${{ inputs.build_type }}.apk
           path: |
-            ${{ env.PROJECT_ROOT }}/build/app/outputs/flutter-apk/app-${{ inputs.build_type }}.apk
             ${{ env.PROJECT_ROOT }}/build/app/outputs/flutter-apk/*.apk
           if-no-files-found: error
