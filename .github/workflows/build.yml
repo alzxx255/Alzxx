@@ -1,38 +1,89 @@
-- name: Download source ZIP from Release
+name: Build APK from Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (contoh: v1.0.0) — HARUS SUDAH ADA DI RELEASES!'
+        required: true
+        type: string
+      build_type:
+        description: 'Jenis Build'
+        required: true
+        type: choice
+        options:
+          - debug
+          - release
+        default: release
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # ✅ 1. Install GitHub CLI (WAJIB — karena runner belum punya gh)
+      - name: Install GitHub CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gh
+
+      # ✅ 2. Authenticate GitHub CLI
+      - name: Authenticate GitHub CLI
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GH_TOKEN" | gh auth login --with-token
+
+      # ✅ 3. Setup Flutter
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      # ✅ 4. Download & Ekstrak ZIP dari Release
+      - name: Download source ZIP from Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p source
+          cd source
+          
+          echo "📥 Mengunduh Release: ${{ inputs.tag }}..."
           gh release download "${{ inputs.tag }}" \
             --repo "${{ github.repository }}" \
             --pattern "*.zip" \
-            --dir source
+            --clobber
 
-          cd source
-          unzip -o *.zip
+          echo "📂 File yang diunduh:"
+          ls -la
+
+          # Unzip semua file zip
+          unzip -o *.zip || true
 
           echo "=== Isi setelah unzip ==="
           find . -maxdepth 3 -type f -name "pubspec.yaml" || true
-          ls -la
 
-          # Cari pubspec.yaml di mana pun
-          PUBSPEC=$(find . -name "pubspec.yaml" | head -1)
+          # Cari pubspec.yaml
+          PUBSPEC=$(find . -not -path "*/build/*" -not -path "*/.git/*" -name "pubspec.yaml" | head -1)
+          
           if [ -z "$PUBSPEC" ]; then
-            echo "ERROR: pubspec.yaml tidak ditemukan!"
+            echo "❌ ERROR: pubspec.yaml TIDAK DITEMUKAN!"
+            echo "Daftar isi folder:"
+            find . -maxdepth 3 -type f | head -30
             exit 1
           fi
 
           ROOT=$(dirname "$PUBSPEC")
+          echo "✅ Project ditemukan di: $ROOT"
           echo "PROJECT_ROOT=$ROOT" >> $GITHUB_ENV
-          echo "Ketemu project di: $ROOT"
 
+      # ✅ 5. Flutter pub get
       - name: Flutter pub get
         run: |
           cd "${{ env.PROJECT_ROOT }}"
-          echo "Sekarang di: $(pwd)"
-          ls -la
+          echo "📂 Direktori: $(pwd)"
           flutter pub get
 
+      # ✅ 6. Build APK
       - name: Build APK
         run: |
           cd "${{ env.PROJECT_ROOT }}"
@@ -41,3 +92,13 @@
           else
             flutter build apk --release
           fi
+
+      # ✅ 7. Upload APK
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-${{ inputs.build_type }}.apk
+          path: |
+            ${{ env.PROJECT_ROOT }}/build/app/outputs/flutter-apk/app-${{ inputs.build_type }}.apk
+            ${{ env.PROJECT_ROOT }}/build/app/outputs/flutter-apk/*.apk
+          if-no-files-found: error
