@@ -21,57 +21,86 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    env:
+      BUILD_TYPE: ${{ inputs.build_type }}
+
     steps:
+
+      # ==========================================
+      # 1. Checkout
+      # ==========================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install GitHub CLI
+      # ==========================================
+      # 2. Install tools
+      # ==========================================
+      - name: Install tools
         run: |
+          set -e
+
           sudo apt-get update
           sudo apt-get install -y gh unzip
 
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: "3.43.3"
-          channel: stable
-          cache: true
+          echo "======================================"
+          echo "TOOLS READY"
+          echo "======================================"
 
-      - name: Check Flutter environment
-        run: |
-          flutter --version
-          dart --version
-          flutter doctor -v
+          gh --version
+          unzip -v | head -1
 
+      # ==========================================
+      # 3. Download ZIP
+      # ==========================================
       - name: Download source ZIP from Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
 
-          mkdir -p source
-          cd source
+          mkdir -p "$GITHUB_WORKSPACE/source"
+
+          cd "$GITHUB_WORKSPACE/source"
+
+          echo "======================================"
+          echo "DOWNLOAD SOURCE"
+          echo "======================================"
 
           gh release download "${{ inputs.tag }}" \
             --repo "${{ github.repository }}" \
             --pattern "*.zip" \
             --clobber
 
-          ZIP_FILE=$(find . -maxdepth 1 -type f -name "*.zip" | head -1)
+          ZIP_FILE=$(find . \
+            -maxdepth 1 \
+            -type f \
+            -name "*.zip" \
+            | head -1)
 
           if [ -z "$ZIP_FILE" ]; then
             echo "❌ ERROR: ZIP project tidak ditemukan."
             exit 1
           fi
 
-          echo "📦 ZIP: $ZIP_FILE"
+          echo "ZIP: $ZIP_FILE"
 
           unzip -o "$ZIP_FILE"
 
-          PUBSPEC=$(find . \
+          echo "✅ ZIP berhasil diekstrak."
+
+      # ==========================================
+      # 4. Detect Flutter Project
+      # ==========================================
+      - name: Detect Flutter project
+        id: project
+        run: |
+          set -e
+
+          PUBSPEC=$(find "$GITHUB_WORKSPACE/source" \
+            -type f \
+            -name "pubspec.yaml" \
             -not -path "*/build/*" \
             -not -path "*/.git/*" \
-            -name "pubspec.yaml" \
             | head -1)
 
           if [ -z "$PUBSPEC" ]; then
@@ -80,79 +109,247 @@ jobs:
           fi
 
           ROOT=$(dirname "$PUBSPEC")
+
           ABS_ROOT="$(cd "$ROOT" && pwd)"
 
-          echo "PROJECT_ROOT=$ABS_ROOT" >> "$GITHUB_ENV"
+          echo "project_root=$ABS_ROOT" >> "$GITHUB_OUTPUT"
 
-          echo "✅ Flutter project ditemukan:"
-          echo "$ABS_ROOT"
+          echo "======================================"
+          echo "FLUTTER PROJECT"
+          echo "======================================"
 
+          echo "PUBSPEC : $PUBSPEC"
+          echo "ROOT    : $ABS_ROOT"
+
+          echo
+          echo "Project files:"
+          ls -la "$ABS_ROOT"
+
+      # ==========================================
+      # 5. Detect Flutter version
+      # ==========================================
+      - name: Detect Flutter version
+        id: flutter_version
+        run: |
+          set -e
+
+          PUBSPEC="${{ steps.project.outputs.project_root }}/pubspec.yaml"
+
+          FLUTTER_VERSION=$(sed -n \
+            's/^[[:space:]]*flutter:[[:space:]]*\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)[[:space:]]*$/\1/p' \
+            "$PUBSPEC" \
+            | head -1)
+
+          echo "======================================"
+          echo "FLUTTER VERSION"
+          echo "======================================"
+
+          if [ -n "$FLUTTER_VERSION" ]; then
+            echo "Detected exact Flutter: $FLUTTER_VERSION"
+            echo "version=$FLUTTER_VERSION" >> "$GITHUB_OUTPUT"
+          else
+            echo "No exact Flutter version found."
+            echo "Using compatibility version."
+            echo "version=3.43.3" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ==========================================
+      # 6. Prepare log directory BEFORE Flutter
+      # ==========================================
+      - name: Prepare logs
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/build_logs"
+
+          echo "Build started at:"
+          date -u
+
+      # ==========================================
+      # 7. Setup Flutter
+      # ==========================================
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ steps.flutter_version.outputs.version }}
+          cache: true
+
+      # ==========================================
+      # 8. Flutter information
+      # ==========================================
+      - name: Check Flutter environment
+        run: |
+          set -e
+
+          echo "======================================"
+          echo "FLUTTER"
+          echo "======================================"
+
+          flutter --version
+
+          echo
+          echo "======================================"
+          echo "DART"
+          echo "======================================"
+
+          dart --version
+
+          echo
+          echo "======================================"
+          echo "DOCTOR"
+          echo "======================================"
+
+          flutter doctor -v
+
+      # ==========================================
+      # 9. Project information
+      # ==========================================
       - name: Show project information
         run: |
-          cd "${{ env.PROJECT_ROOT }}"
+          PROJECT="${{ steps.project.outputs.project_root }}"
 
           echo "======================================"
           echo "PROJECT"
           echo "======================================"
 
-          pwd
-          echo
-
-          echo "PUBSPEC:"
-          grep -E "^(name:|version:)" pubspec.yaml || true
+          echo "Path:"
+          echo "$PROJECT"
 
           echo
-          echo "FONT AWESOME:"
-          grep -n "font_awesome_flutter" pubspec.yaml || true
+          echo "pubspec:"
+          grep -E "^(name:|version:|environment:)" \
+            "$PROJECT/pubspec.yaml" || true
 
+          echo
+          echo "Font Awesome:"
+          grep -n \
+            "font_awesome_flutter" \
+            "$PROJECT/pubspec.yaml" || true
+
+      # ==========================================
+      # 10. Flutter Clean
+      # ==========================================
       - name: Flutter Clean
         run: |
-          cd "${{ env.PROJECT_ROOT }}"
+          set -e
+
+          cd "${{ steps.project.outputs.project_root }}"
+
           flutter clean
 
+      # ==========================================
+      # 11. Pub Get
+      # ==========================================
       - name: Flutter Pub Get
         run: |
-          cd "${{ env.PROJECT_ROOT }}"
+          set -e
+
+          cd "${{ steps.project.outputs.project_root }}"
+
           flutter pub get
 
-      - name: Analyze dependencies
+      # ==========================================
+      # 12. Dependency report
+      # ==========================================
+      - name: Dependency report
         run: |
-          cd "${{ env.PROJECT_ROOT }}"
-          flutter pub deps --style=compact
+          cd "${{ steps.project.outputs.project_root }}"
 
+          flutter pub deps --style=compact \
+            > "$GITHUB_WORKSPACE/build_logs/dependencies.txt"
+
+          echo "Dependency report generated."
+
+      # ==========================================
+      # 13. Analyze
+      # ==========================================
+      - name: Flutter Analyze
+        continue-on-error: true
+        run: |
+          cd "${{ steps.project.outputs.project_root }}"
+
+          flutter analyze \
+            > "$GITHUB_WORKSPACE/build_logs/flutter-analyze.log" \
+            2>&1
+
+      # ==========================================
+      # 14. Build APK
+      # ==========================================
       - name: Build APK
+        id: apk_build
         run: |
           set -o pipefail
 
-          cd "${{ env.PROJECT_ROOT }}"
+          PROJECT="${{ steps.project.outputs.project_root }}"
 
-          mkdir -p build_logs
+          cd "$PROJECT"
 
-          if [ "${{ inputs.build_type }}" = "debug" ]; then
+          LOG="$GITHUB_WORKSPACE/build_logs/flutter-build.log"
+
+          echo "======================================" | tee "$LOG"
+          echo "FLUTTER APK BUILD" | tee -a "$LOG"
+          echo "======================================" | tee -a "$LOG"
+
+          echo "Build type : $BUILD_TYPE" | tee -a "$LOG"
+          echo "Project    : $PROJECT" | tee -a "$LOG"
+          echo "Started    : $(date -u)" | tee -a "$LOG"
+
+          echo "" | tee -a "$LOG"
+
+          if [ "$BUILD_TYPE" = "debug" ]; then
+
             flutter build apk \
               --debug \
               --verbose \
-              2>&1 | tee build_logs/flutter-build.log
+              2>&1 | tee -a "$LOG"
+
           else
+
             flutter build apk \
               --release \
               --verbose \
-              2>&1 | tee build_logs/flutter-build.log
+              2>&1 | tee -a "$LOG"
+
           fi
 
+      # ==========================================
+      # 15. Collect output information
+      # ==========================================
+      - name: Collect APK information
+        if: always()
+        run: |
+          PROJECT="${{ steps.project.outputs.project_root }}"
+
+          echo "======================================"
+          echo "APK OUTPUT"
+          echo "======================================"
+
+          find "$PROJECT/build" \
+            -type f \
+            \( -name "*.apk" -o -name "*.aab" \) \
+            -print 2>/dev/null || true
+
+      # ==========================================
+      # 16. Upload APK
+      # ==========================================
       - name: Upload APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: app-${{ inputs.build_type }}
           path: |
-            ${{ env.PROJECT_ROOT }}/build/app/outputs/flutter-apk/*.apk
+            ${{ steps.project.outputs.project_root }}/build/app/outputs/flutter-apk/*.apk
           if-no-files-found: error
+          compression-level: 0
 
-      - name: Upload build log
+      # ==========================================
+      # 17. Upload ALL logs
+      # ==========================================
+      - name: Upload full build logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log-${{ inputs.build_type }}
+          name: build-log-${{ inputs.build_type }}-${{ github.run_id }}
           path: |
-            ${{ env.PROJECT_ROOT }}/build_logs/flutter-build.log
-          if-no-files-found: ignore
+            ${{ github.workspace }}/build_logs/**
+          if-no-files-found: warn
+          compression-level: 6
