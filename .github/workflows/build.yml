@@ -32,7 +32,7 @@ jobs:
         with:
           channel: stable
 
-      # ✅ 3. Download ZIP dari Release — TOKEN CUKUP DI SET DI SINI
+      # ✅ 3. Download ZIP & Ekstrak — PAKAI PATH ABSOLUTE
       - name: Download source ZIP from Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -63,15 +63,18 @@ jobs:
             exit 1
           fi
 
+          # 🔧 GUNAKAN PATH ABSOLUTE — INI YANG DIPERBAIKI!
           ROOT=$(dirname "$PUBSPEC")
-          echo "✅ Project ditemukan di: $ROOT"
-          echo "PROJECT_ROOT=$ROOT" >> $GITHUB_ENV
+          ABS_ROOT="$(pwd)/$ROOT"
+          echo "✅ Project ditemukan di: $ABS_ROOT"
+          echo "PROJECT_ROOT=$ABS_ROOT" >> $GITHUB_ENV
 
-      # ✅ 4. Flutter pub get
+      # ✅ 4. Flutter pub get — GUNAKAN PATH ABSOLUTE
       - name: Flutter pub get
         run: |
+          echo "📂 Direktori Project: ${{ env.PROJECT_ROOT }}"
           cd "${{ env.PROJECT_ROOT }}"
-          echo "📂 Direktori: $(pwd)"
+          pwd
           flutter pub get
 
       # ✅ 5. Build APK
