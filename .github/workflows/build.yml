@@ -20,26 +20,19 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # ✅ 1. Install GitHub CLI (WAJIB — karena runner belum punya gh)
+      # ✅ 1. Install GitHub CLI
       - name: Install GitHub CLI
         run: |
           sudo apt-get update
           sudo apt-get install -y gh
 
-      # ✅ 2. Authenticate GitHub CLI
-      - name: Authenticate GitHub CLI
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          echo "$GH_TOKEN" | gh auth login --with-token
-
-      # ✅ 3. Setup Flutter
+      # ✅ 2. Setup Flutter
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
 
-      # ✅ 4. Download & Ekstrak ZIP dari Release
+      # ✅ 3. Download ZIP dari Release — TOKEN CUKUP DI SET DI SINI
       - name: Download source ZIP from Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -56,13 +49,11 @@ jobs:
           echo "📂 File yang diunduh:"
           ls -la
 
-          # Unzip semua file zip
           unzip -o *.zip || true
 
           echo "=== Isi setelah unzip ==="
           find . -maxdepth 3 -type f -name "pubspec.yaml" || true
 
-          # Cari pubspec.yaml
           PUBSPEC=$(find . -not -path "*/build/*" -not -path "*/.git/*" -name "pubspec.yaml" | head -1)
           
           if [ -z "$PUBSPEC" ]; then
@@ -76,14 +67,14 @@ jobs:
           echo "✅ Project ditemukan di: $ROOT"
           echo "PROJECT_ROOT=$ROOT" >> $GITHUB_ENV
 
-      # ✅ 5. Flutter pub get
+      # ✅ 4. Flutter pub get
       - name: Flutter pub get
         run: |
           cd "${{ env.PROJECT_ROOT }}"
           echo "📂 Direktori: $(pwd)"
           flutter pub get
 
-      # ✅ 6. Build APK
+      # ✅ 5. Build APK
       - name: Build APK
         run: |
           cd "${{ env.PROJECT_ROOT }}"
@@ -93,7 +84,7 @@ jobs:
             flutter build apk --release
           fi
 
-      # ✅ 7. Upload APK
+      # ✅ 6. Upload APK
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
