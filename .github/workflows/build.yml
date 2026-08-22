@@ -67,7 +67,7 @@ jobs:
           rm -f "$ZIP_FILE"
           echo "✅ ZIP Extracted!"
 
-      # ✅ OTOMATIS CARI PUBSPEC — WALAU ADA FOLDER TAMBAHAN! ✅
+      # ✅ CARI PUBSPEC — TANPA PIPE, PASTI JALAN WALAU ADA FOLDER TAMBAHAN! ✅
       - name: Detect Flutter project
         id: project
         shell: bash
@@ -75,16 +75,17 @@ jobs:
           set -euo pipefail
           echo "🔍 Mencari pubspec.yaml..."
           
-          # Cari pubspec.yaml di SEMUA subfolder — sampai ketemu!
-          PUBSPEC="$(find "$SOURCE_DIR" -type f -name "pubspec.yaml" \
-            -not -path "*/build/*" -not -path "*/.git/*" -not -path "*/.pub/*" | head -n 1)"
+          mapfile -t PUBSPEC_LIST < <(find "$SOURCE_DIR" -type f -name "pubspec.yaml" \
+            -not -path "*/build/*" -not -path "*/.git/*" -not -path "*/.pub/*")
+          
+          PUBSPEC="${PUBSPEC_LIST[0]:-}"
 
           if [ -z "$PUBSPEC" ]; then
             echo "❌ ERROR: pubspec.yaml TIDAK DITEMUKAN!"
             echo "📂 Isi folder SOURCE_DIR:"
             ls -la "$SOURCE_DIR"
-            echo "📂 Semua file di dalam ZIP:"
-            find "$SOURCE_DIR" -maxdepth 3 -type f | head -n 30
+            echo "📂 Daftar folder:"
+            find "$SOURCE_DIR" -maxdepth 2 -type d | head -n 20
             exit 1
           fi
 
