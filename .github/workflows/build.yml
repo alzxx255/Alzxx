@@ -99,10 +99,11 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      # ✅ Channel stable — selalu ambil rilis terbaru, otomatis Dart >= 3.8.1 ✅
+      # ✅ Flutter 3.32.8 — Dart 3.8.1, kompatibel dengan Gradle 8.12 project ini ✅
       - name: Setup Flutter — Stable Release
         uses: subosito/flutter-action@v2
         with:
+          flutter-version: '3.32.8'
           channel: stable
           cache: true
 
