@@ -58,17 +58,38 @@ jobs:
             --pattern "*.zip" \
             --clobber
           ZIP_FILE="$(find . -maxdepth 1 -type f -iname '*.zip' | head -n 1)"
-          if [ -z "$ZIP_FILE" ]; then echo "ERROR: ZIP tidak ditemukan"; exit 1; fi
-          unzip -o "$ZIP_FILE" && rm -f "$ZIP_FILE"
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: ZIP tidak ditemukan!"
+            exit 1
+          fi
+          echo "Extracting: $ZIP_FILE"
+          unzip -o "$ZIP_FILE"
+          rm -f "$ZIP_FILE"
+          echo "✅ ZIP Extracted!"
 
+      # ✅ OTOMATIS CARI PUBSPEC — WALAU ADA FOLDER TAMBAHAN! ✅
       - name: Detect Flutter project
         id: project
         shell: bash
         run: |
           set -euo pipefail
-          PUBSPEC="$(find "$SOURCE_DIR" -name "pubspec.yaml" -not -path "*/build/*" | head -n 1)"
-          [ -z "$PUBSPEC" ] && { echo "ERROR: pubspec.yaml tidak ada"; exit 1; }
+          echo "🔍 Mencari pubspec.yaml..."
+          
+          # Cari pubspec.yaml di SEMUA subfolder — sampai ketemu!
+          PUBSPEC="$(find "$SOURCE_DIR" -type f -name "pubspec.yaml" \
+            -not -path "*/build/*" -not -path "*/.git/*" -not -path "*/.pub/*" | head -n 1)"
+
+          if [ -z "$PUBSPEC" ]; then
+            echo "❌ ERROR: pubspec.yaml TIDAK DITEMUKAN!"
+            echo "📂 Isi folder SOURCE_DIR:"
+            ls -la "$SOURCE_DIR"
+            echo "📂 Semua file di dalam ZIP:"
+            find "$SOURCE_DIR" -maxdepth 3 -type f | head -n 30
+            exit 1
+          fi
+
           PROJECT_ROOT="$(cd "$(dirname "$PUBSPEC")" && pwd)"
+          echo "✅ Project ditemukan di: $PROJECT_ROOT"
           echo "project_root=$PROJECT_ROOT" >> "$GITHUB_OUTPUT"
 
       - name: Setup Java 17
@@ -77,7 +98,7 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      # ✅ FLUTTER 3.32.0 — SUDAH RILIS! Dart 3.8.0 ✅
+      # ✅ Flutter 3.32.0 — Dart 3.8.0 ✅
       - name: Setup Flutter — Stable Release
         uses: subosito/flutter-action@v2
         with:
@@ -119,6 +140,7 @@ jobs:
         run: |
           mkdir -p "$GITHUB_WORKSPACE/apk_output"
           find "${{ steps.project.outputs.project_root }}/build/app/outputs/flutter-apk" -name "*.apk" -exec cp {} "$GITHUB_WORKSPACE/apk_output/" \;
+          ls -lh "$GITHUB_WORKSPACE/apk_output"
 
       - name: Upload APK
         if: success()
