@@ -99,11 +99,10 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      # ✅ Flutter 3.32.0 — Dart 3.8.0 ✅
+      # ✅ Channel stable — selalu ambil rilis terbaru, otomatis Dart >= 3.8.1 ✅
       - name: Setup Flutter — Stable Release
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.32.0'
           channel: stable
           cache: true
 
