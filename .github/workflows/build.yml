@@ -7,7 +7,6 @@ on:
         description: "Release tag containing source ZIP"
         required: true
         type: string
-
       build_type:
         description: "APK build type"
         required: true
@@ -36,7 +35,6 @@ jobs:
       LOG_DIR: ${{ github.workspace }}/build_logs
 
     steps:
-
       - name: Checkout builder repository
         uses: actions/checkout@v4
 
@@ -55,40 +53,23 @@ jobs:
         run: |
           set -euxo pipefail
           cd "$SOURCE_DIR"
-
           gh release download "${{ inputs.tag }}" \
             --repo "${{ github.repository }}" \
             --pattern "*.zip" \
             --clobber
-
           ZIP_FILE="$(find . -maxdepth 1 -type f -iname '*.zip' | head -n 1)"
-
-          if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: Source ZIP tidak ditemukan."
-            exit 1
-          fi
-
-          echo "Extracting: $ZIP_FILE"
-          unzip -o "$ZIP_FILE"
-          rm -f "$ZIP_FILE"
+          if [ -z "$ZIP_FILE" ]; then echo "ERROR: ZIP tidak ditemukan"; exit 1; fi
+          unzip -o "$ZIP_FILE" && rm -f "$ZIP_FILE"
 
       - name: Detect Flutter project
         id: project
         shell: bash
         run: |
           set -euo pipefail
-
-          PUBSPEC="$(find "$SOURCE_DIR" -type f -name "pubspec.yaml" \
-            -not -path "*/build/*" -not -path "*/.git/*" | head -n 1)"
-
-          if [ -z "$PUBSPEC" ]; then
-            echo "ERROR: pubspec.yaml tidak ditemukan."
-            exit 1
-          fi
-
+          PUBSPEC="$(find "$SOURCE_DIR" -name "pubspec.yaml" -not -path "*/build/*" | head -n 1)"
+          [ -z "$PUBSPEC" ] && { echo "ERROR: pubspec.yaml tidak ada"; exit 1; }
           PROJECT_ROOT="$(cd "$(dirname "$PUBSPEC")" && pwd)"
           echo "project_root=$PROJECT_ROOT" >> "$GITHUB_OUTPUT"
-          echo "Project: $PROJECT_ROOT"
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
@@ -96,19 +77,17 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      # ✅ FLUTTER 3.34.0 → DART 3.9.0 → COCOK DENGAN SDK ^3.8.1 ✅
-      - name: Setup Flutter — Dart 3.9.0 (Support SDK ^3.8.1)
+      # ✅ FLUTTER 3.32.0 — SUDAH RILIS! Dart 3.8.0 ✅
+      - name: Setup Flutter — Stable Release
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.34.0'
+          flutter-version: '3.32.0'
           channel: stable
           cache: true
 
       - name: Flutter environment check
         run: |
-          echo "=== Flutter Version ==="
           flutter --version
-          echo "=== Dart Version ==="
           dart --version
           flutter doctor -v
 
@@ -116,48 +95,30 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          PROJECT="${{ steps.project.outputs.project_root }}"
-          cd "$PROJECT"
+          cd "${{ steps.project.outputs.project_root }}"
           flutter clean
           flutter pub get
 
       - name: Fix Gradle Compatibility
         shell: bash
         run: |
-          set -euo pipefail
-          PROJECT="${{ steps.project.outputs.project_root }}"
-          cd "$PROJECT/android"
+          cd "${{ steps.project.outputs.project_root }}/android"
           echo "android.newDsl=false" >> gradle.properties
           echo "org.gradle.jvmargs=-Xmx4G" >> gradle.properties
-          echo "✅ Gradle config fixed!"
 
       - name: Build APK
         shell: bash
         run: |
           set -o pipefail
-          PROJECT="${{ steps.project.outputs.project_root }}"
-          LOG="$LOG_DIR/flutter-build.log"
-          cd "$PROJECT"
-
-          echo "Build Type : $BUILD_TYPE" | tee "$LOG"
-          flutter --version 2>&1 | tee -a "$LOG"
-          echo "" | tee -a "$LOG"
-
-          if [ "$BUILD_TYPE" = "debug" ]; then
-            flutter build apk --debug --verbose 2>&1 | tee -a "$LOG"
-          else
-            flutter build apk --release --verbose 2>&1 | tee -a "$LOG"
-          fi
+          cd "${{ steps.project.outputs.project_root }}"
+          flutter build apk --${{ inputs.build_type }} --verbose
 
       - name: Package APK
         if: success()
         shell: bash
         run: |
-          set -euo pipefail
-          PROJECT="${{ steps.project.outputs.project_root }}"
           mkdir -p "$GITHUB_WORKSPACE/apk_output"
-          find "$PROJECT/build/app/outputs/flutter-apk" -type f -name "*.apk" -exec cp {} "$GITHUB_WORKSPACE/apk_output/" \;
-          ls -lh "$GITHUB_WORKSPACE/apk_output"
+          find "${{ steps.project.outputs.project_root }}/build/app/outputs/flutter-apk" -name "*.apk" -exec cp {} "$GITHUB_WORKSPACE/apk_output/" \;
 
       - name: Upload APK
         if: success()
@@ -171,6 +132,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log-${{ inputs.build_type }}-${{ github.run_id }}
+          name: build-log-${{ inputs.build_type }}
           path: ${{ github.workspace }}/build_logs/**
           if-no-files-found: warn
