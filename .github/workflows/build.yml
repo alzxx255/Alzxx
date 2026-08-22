@@ -21,7 +21,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: flutter-build-\( {{ github.repository }}- \){{ inputs.tag }}-${{ inputs.build_type }}
+  group: flutter-build-${{ github.repository }}-${{ inputs.tag }}-${{ inputs.build_type }}
   cancel-in-progress: false
 
 jobs:
@@ -86,12 +86,12 @@ jobs:
             exit 1
           fi
 
-          PROJECT_ROOT="\( (cd " \)(dirname "$PUBSPEC")" && pwd)"
+          PROJECT_ROOT="$(cd "$(dirname "$PUBSPEC")" && pwd)"
           echo "project_root=$PROJECT_ROOT" >> "$GITHUB_OUTPUT"
           echo "Project: $PROJECT_ROOT"
 
-      # ========== DETEKSI VERSI (LAMA & MODERN) ==========
-      - name: Detect Flutter version (smart)
+      # ========== DETEKSI VERSI FLUTTER ==========
+      - name: Detect Flutter version
         id: flutter
         shell: bash
         run: |
@@ -99,31 +99,24 @@ jobs:
 
           PROJECT="${{ steps.project.outputs.project_root }}"
           PUBSPEC="$PROJECT/pubspec.yaml"
-
-          # Coba ambil versi dari pubspec
-          VERSION="\( (sed -nE 's/^[[:space:]]*flutter:[[:space:]]*([0-9]+\.[0-9]+\.[0-9]+)[[:space:]]* \)/\1/p' "$PUBSPEC" | head -n 1 || true)"
-
-          # Versi default yang paling aman (kompatibel lama & modern)
           SAFE_VERSION="3.16.9"
 
+          VERSION="$(grep -oP 'sdk:\s*">=?\K[0-9.]+' "$PUBSPEC" | head -n 1 || true)"
+
           if [ -z "$VERSION" ]; then
-            echo "Tidak ada versi spesifik di pubspec → pakai $SAFE_VERSION"
+            echo "Tidak terdeteksi versi → pakai $SAFE_VERSION"
             echo "version=$SAFE_VERSION" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          echo "Versi dari pubspec: $VERSION"
-
-          # Ambil major.minor
           MAJOR=$(echo "$VERSION" | cut -d. -f1)
           MINOR=$(echo "$VERSION" | cut -d. -f2)
 
-          # Kalau terlalu baru (di atas 3.22) atau aneh → pakai safe version
           if [ "$MAJOR" -gt 3 ] || { [ "$MAJOR" -eq 3 ] && [ "$MINOR" -gt 22 ]; }; then
-            echo "Versi terlalu baru ($VERSION) → dipaksa pakai $SAFE_VERSION"
+            echo "Versi terlalu baru ($VERSION) → pakai $SAFE_VERSION"
             echo "version=$SAFE_VERSION" >> "$GITHUB_OUTPUT"
           else
-            echo "Versi aman → pakai $VERSION"
+            echo "Versi terdeteksi: $VERSION"
             echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           fi
 
@@ -155,6 +148,22 @@ jobs:
           flutter clean
           flutter pub get
 
+      # ✅ FIX: Upgrade Gradle & Disable New DSL
+      - name: Fix Gradle & AGP Compatibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROJECT="${{ steps.project.outputs.project_root }}"
+          cd "$PROJECT/android"
+
+          # Upgrade Gradle ke 8.14.0
+          sed -i 's/gradle-8\.[0-9]*\.[0-9]*/gradle-8.14.0/g' gradle/wrapper/gradle-wrapper.properties || true
+          
+          # Disable new DSL untuk kompatibilitas Flutter
+          echo "android.newDsl=false" >> gradle.properties
+          
+          echo "✅ Gradle & DSL fixed!"
+
       - name: Build APK
         shell: bash
         run: |
@@ -168,9 +177,9 @@ jobs:
           echo "" | tee -a "$LOG"
 
           if [ "$BUILD_TYPE" = "debug" ]; then
-            flutter build apk --debug --verbose 2>&1 | tee -a "$LOG"
+            flutter build apk --debug --verbose --android-skip-build-dependency-validation 2>&1 | tee -a "$LOG"
           else
-            flutter build apk --release --verbose 2>&1 | tee -a "$LOG"
+            flutter build apk --release --verbose --android-skip-build-dependency-validation 2>&1 | tee -a "$LOG"
           fi
 
       - name: Package APK
@@ -195,6 +204,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log-\( {{ inputs.build_type }}- \){{ github.run_id }}
+          name: build-log-${{ inputs.build_type }}-${{ github.run_id }}
           path: ${{ github.workspace }}/build_logs/**
           if-no-files-found: warn
