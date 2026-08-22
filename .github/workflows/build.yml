@@ -90,35 +90,33 @@ jobs:
           echo "project_root=$PROJECT_ROOT" >> "$GITHUB_OUTPUT"
           echo "Project: $PROJECT_ROOT"
 
-      # ========== DETEKSI VERSI FLUTTER ==========
-      - name: Detect Flutter version
-        id: flutter
+      # ========== DETEKSI VERSI — KOMPATIBEL LAMA & MODERN ==========
+      - name: Detect Flutter & Dart version
+        id: versions
         shell: bash
         run: |
           set -euo pipefail
-
           PROJECT="${{ steps.project.outputs.project_root }}"
           PUBSPEC="$PROJECT/pubspec.yaml"
-          SAFE_VERSION="3.16.9"
 
-          VERSION="$(grep -oP 'sdk:\s*">=?\K[0-9.]+' "$PUBSPEC" | head -n 1 || true)"
+          # Baca versi SDK minimum dari pubspec.yaml
+          SDK_RANGE="$(grep -oP 'sdk:\s*"[^"]+"' "$PUBSPEC" | grep -oP '[\d.]+' | head -n 1 || true)"
+          echo "SDK dari pubspec: >=$SDK_RANGE"
 
-          if [ -z "$VERSION" ]; then
-            echo "Tidak terdeteksi versi → pakai $SAFE_VERSION"
-            echo "version=$SAFE_VERSION" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          MAJOR=$(echo "$VERSION" | cut -d. -f1)
-          MINOR=$(echo "$VERSION" | cut -d. -f2)
-
-          if [ "$MAJOR" -gt 3 ] || { [ "$MAJOR" -eq 3 ] && [ "$MINOR" -gt 22 ]; }; then
-            echo "Versi terlalu baru ($VERSION) → pakai $SAFE_VERSION"
-            echo "version=$SAFE_VERSION" >> "$GITHUB_OUTPUT"
+          # Pilih Flutter yang COCOK — otomatis sesuaikan
+          # Dart 3.8+ → Flutter 3.24+ | Dart 3.5+ → Flutter 3.22+ | Dart 3.2+ → Flutter 3.16.x
+          if echo "$SDK_RANGE" | grep -qE '^(3\.(9|[2-8][0-9])|[4-9])\.'; then
+            FLUTTER_VERSION="3.27.0"   # Dart 3.6 → untuk SDK 3.5+
+            echo "✅ Pakai Flutter 3.27.0 (Dart 3.6) — cocok untuk SDK 3.5–3.8+"
+          elif echo "$SDK_RANGE" | grep -qE '^(3\.(3|[4-9])|[4-9])\.'; then
+            FLUTTER_VERSION="3.22.3"   # Dart 3.4
+            echo "✅ Pakai Flutter 3.22.3 (Dart 3.4)"
           else
-            echo "Versi terdeteksi: $VERSION"
-            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+            FLUTTER_VERSION="3.16.9"    # Dart 3.2 — paling kompatibel
+            echo "✅ Pakai Flutter 3.16.9 (Dart 3.2) — kompatibel umum"
           fi
+
+          echo "flutter_version=$FLUTTER_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
@@ -126,17 +124,19 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Setup Flutter
+      - name: Setup Flutter (Auto Version)
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: ${{ steps.flutter.outputs.version }}
+          flutter-version: ${{ steps.versions.outputs.flutter_version }}
           channel: stable
           cache: true
 
-      - name: Flutter environment
+      - name: Flutter environment check
         run: |
           echo "=== Flutter Version ==="
           flutter --version
+          echo "=== Dart Version ==="
+          dart --version
           flutter doctor -v
 
       - name: Flutter clean & pub get
@@ -148,21 +148,18 @@ jobs:
           flutter clean
           flutter pub get
 
-      # ✅ FIX: Upgrade Gradle & Disable New DSL
-      - name: Fix Gradle & AGP Compatibility
+      - name: Fix Gradle Compatibility
         shell: bash
         run: |
           set -euo pipefail
           PROJECT="${{ steps.project.outputs.project_root }}"
           cd "$PROJECT/android"
-
-          # Upgrade Gradle ke 8.14.0
-          sed -i 's/gradle-8\.[0-9]*\.[0-9]*/gradle-8.14.0/g' gradle/wrapper/gradle-wrapper.properties || true
           
-          # Disable new DSL untuk kompatibilitas Flutter
+          # Disable new DSL untuk kompatibilitas
           echo "android.newDsl=false" >> gradle.properties
+          echo "org.gradle.jvmargs=-Xmx4G" >> gradle.properties
           
-          echo "✅ Gradle & DSL fixed!"
+          echo "✅ Gradle config fixed!"
 
       - name: Build APK
         shell: bash
@@ -177,9 +174,9 @@ jobs:
           echo "" | tee -a "$LOG"
 
           if [ "$BUILD_TYPE" = "debug" ]; then
-            flutter build apk --debug --verbose --android-skip-build-dependency-validation 2>&1 | tee -a "$LOG"
+            flutter build apk --debug --verbose 2>&1 | tee -a "$LOG"
           else
-            flutter build apk --release --verbose --android-skip-build-dependency-validation 2>&1 | tee -a "$LOG"
+            flutter build apk --release --verbose 2>&1 | tee -a "$LOG"
           fi
 
       - name: Package APK
