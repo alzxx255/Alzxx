@@ -203,7 +203,7 @@ jobs:
         run: |
           mkdir -p "$LOG_DIR"
           python3 - "/tmp/flutter-build-full.log" "$LOG_DIR/build-error.txt" <<'PY'
-          import os, re, sys
+          import os, sys
 
           raw_path, report_path = sys.argv[1:3]
           try:
@@ -215,16 +215,24 @@ jobs:
           project_errors = []
           for line in lines:
               l = line.strip()
-              if any(keyword in l for keyword in ["Error:", "error:", "FAILURE:", "Exception:", "lib/", "android/", "pubspec.yaml"]):
-                  if l and not l.startswith("package:") and l not in project_errors:
+              # BUANG SEMUA noise proses ekstraksi / unzipping / copy file
+              if any(noise in l for noise in ["creating:", "inflating:", "Extracting:", "Downloading", "Copying", "package:"]):
+                  continue
+              
+              # Tangkap baris yang benar-benar indikasi error/kegagalan build
+              is_error = any(kw in l for kw in ["Error", "error", "FAILURE", "Exception", "FAILED", "Could not", "Execution failed", "A problem occurred"])
+              has_code_error = any(p in l for p in [".dart", "build.gradle", "pubspec.yaml"]) and any(w in l.lower() for w in ["error", "failed", "expected", "undefined", "unresolved", "not found"])
+
+              if is_error or has_code_error:
+                  if l and l not in project_errors:
                       project_errors.append(l)
 
-          project_errors = project_errors[:35]
+          project_errors = project_errors[:30]
 
           if not project_errors:
               content = "❌ BUILD FAILED\n\n(Tidak ada detail error spesifik yang terekam.)\n"
           else:
-              content = "❌ ERROR PADA PROYEK (lib / android / pubspec):\n\n" + "\n".join(f"• {e}" for e in project_errors) + "\n"
+              content = "❌ INTI ERROR BUILD APK:\n\n" + "\n".join(f"• {e}" for e in project_errors) + "\n"
 
           with open(report_path, "w", encoding="utf-8") as f:
               f.write(content)
