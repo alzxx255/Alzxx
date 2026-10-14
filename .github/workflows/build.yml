@@ -34,7 +34,7 @@ jobs:
       BUILD_TYPE: ${{ inputs.build_type }}
       SOURCE_DIR: ${{ github.workspace }}/source
       LOG_DIR: ${{ github.workspace }}/build_logs
-      RAW_LOG: ${{ runner.temp }}/flutter-build-full.log
+      RAW_LOG: /tmp/flutter-build-full.log
 
     steps:
       - name: Checkout builder repository
@@ -49,7 +49,6 @@ jobs:
           mkdir -p "$SOURCE_DIR" "$LOG_DIR"
           : > "$RAW_LOG"
           rm -f "$LOG_DIR/build-error.txt"
-          echo "Prepare environment completed."
 
       - name: Download source ZIP
         id: download
@@ -75,7 +74,6 @@ jobs:
             exit 1
           fi
 
-          echo "Source ZIP: $ZIP_FILE"
           unzip -o "$ZIP_FILE"
           rm -f "$ZIP_FILE"
 
@@ -109,7 +107,6 @@ jobs:
           fi
 
           echo "project_root=$PROJECT_ROOT" >> "$GITHUB_OUTPUT"
-          echo "Flutter project detected."
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
@@ -131,52 +128,77 @@ jobs:
           flutter --version
           dart --version
 
+      - name: Flutter clean
+        id: clean
+        shell: bash
+        env:
+          PROJECT_ROOT: ${{ steps.project.outputs.project_root }}
+        run: |
+          set +e
+          cd "$PROJECT_ROOT"
+          flutter clean > "$RAW_LOG" 2>&1
+          RESULT=$?
+          set -e
+
+          if [ "$RESULT" -ne 0 ]; then
+            echo "Flutter clean gagal."
+            tail -n 20 "$RAW_LOG"
+            exit "$RESULT"
+          fi
+
+      - name: Flutter pub get
+        id: pubget
+        shell: bash
+        env:
+          PROJECT_ROOT: ${{ steps.project.outputs.project_root }}
+        run: |
+          set +e
+          cd "$PROJECT_ROOT"
+          flutter pub get > "$RAW_LOG" 2>&1
+          RESULT=$?
+          set -e
+
+          if [ "$RESULT" -ne 0 ]; then
+            echo "Dependency installation gagal."
+            tail -n 30 "$RAW_LOG"
+            exit "$RESULT"
+          fi
+
+      - name: Fix Gradle Compatibility
+        shell: bash
+        env:
+          PROJECT_ROOT: ${{ steps.project.outputs.project_root }}
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_ROOT/android"
+          touch gradle.properties
+
+          grep -qxF 'android.newDsl=false' gradle.properties ||
+            echo 'android.newDsl=false' >> gradle.properties
+
+          grep -q '^org.gradle.jvmargs=' gradle.properties ||
+            echo 'org.gradle.jvmargs=-Xmx4G' >> gradle.properties
+
       - name: Build APK
         id: apk_build
         shell: bash
         env:
           PROJECT_ROOT: ${{ steps.project.outputs.project_root }}
         run: |
-          set -uo pipefail
-
-          mkdir -p "$LOG_DIR"
-          : > "$RAW_LOG"
-
-          run_stage() {
-            local stage="$1"
-            shift
-
-            echo "===== STAGE: $stage =====" >> "$RAW_LOG"
-            echo "Running: $stage"
-
-            "$@" >> "$RAW_LOG" 2>&1
-            local result=$?
-
-            if [ "$result" -ne 0 ]; then
-              echo "$stage" > "$RUNNER_TEMP/failed-stage.txt"
-              echo "$result" > "$RUNNER_TEMP/failed-exit-code.txt"
-              echo "Stage failed: $stage (exit $result)"
-              return "$result"
-            fi
-
-            return 0
-          }
-
-          if [ -z "${PROJECT_ROOT:-}" ] ||
-             [ ! -f "$PROJECT_ROOT/pubspec.yaml" ]; then
-            echo "Project Flutter tidak ditemukan." >> "$RAW_LOG"
-            echo "Detect Flutter project" > "$RUNNER_TEMP/failed-stage.txt"
-            echo "1" > "$RUNNER_TEMP/failed-exit-code.txt"
-            exit 1
-          fi
-
+          set +e
           cd "$PROJECT_ROOT"
 
-          run_stage "Flutter clean" flutter clean || exit $?
-          run_stage "Flutter pub get" flutter pub get || exit $?
+          flutter build apk --"$BUILD_TYPE" --verbose \
+            > "$RAW_LOG" 2>&1
 
-          run_stage "Build APK" \
-            flutter build apk --"$BUILD_TYPE" --verbose || exit $?
+          RESULT=$?
+          set -e
+
+          if [ "$RESULT" -ne 0 ]; then
+            echo "Build APK gagal."
+            tail -n 35 "$RAW_LOG"
+            exit "$RESULT"
+          fi
 
       - name: Package APK
         if: success()
@@ -211,14 +233,15 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Generate concise error report
+      - name: Generate concise build report
         if: always()
         shell: bash
         env:
           DOWNLOAD_OUTCOME: ${{ steps.download.outcome }}
           PROJECT_OUTCOME: ${{ steps.project.outcome }}
+          CLEAN_OUTCOME: ${{ steps.clean.outcome }}
+          PUBGET_OUTCOME: ${{ steps.pubget.outcome }}
           BUILD_OUTCOME: ${{ steps.apk_build.outcome }}
-          APK_OUTCOME: ${{ steps.apk_build.conclusion }}
         run: |
           mkdir -p "$LOG_DIR"
 
@@ -229,30 +252,19 @@ jobs:
 
           raw_path, report_path = sys.argv[1:3]
 
-          def read_file(path):
-              try:
-                  with open(path, encoding="utf-8",
-                            errors="replace") as f:
-                      return f.read().strip()
-              except OSError:
-                  return ""
+          try:
+              with open(raw_path, encoding="utf-8",
+                        errors="replace") as f:
+                  lines = f.read().splitlines()
+          except OSError:
+              lines = []
 
-          raw = read_file(raw_path)
-          lines = raw.splitlines()
-
+          mode = os.getenv("BUILD_TYPE", "unknown")
           download = os.getenv("DOWNLOAD_OUTCOME", "unknown")
           project = os.getenv("PROJECT_OUTCOME", "unknown")
+          clean = os.getenv("CLEAN_OUTCOME", "unknown")
+          pubget = os.getenv("PUBGET_OUTCOME", "unknown")
           build = os.getenv("BUILD_OUTCOME", "unknown")
-          mode = os.getenv("BUILD_TYPE", "unknown")
-
-          failed_stage = read_file(
-              os.path.join(os.environ.get("RUNNER_TEMP", "/tmp"),
-                           "failed-stage.txt")
-          )
-          exit_code = read_file(
-              os.path.join(os.environ.get("RUNNER_TEMP", "/tmp"),
-                           "failed-exit-code.txt")
-          )
 
           patterns = [
               r"FAILURE: Build failed",
@@ -262,7 +274,6 @@ jobs:
               r"Could not resolve",
               r"Could not find",
               r"Target of URI doesn't exist",
-              r"Because .+ depends on",
               r"Compilation failed",
               r"Error:",
               r"error:",
@@ -276,26 +287,21 @@ jobs:
               r"Duplicate class",
               r"already defined",
               r"Expected .+ but found",
-              r"Invalid depfile",
               r"SocketException",
               r"HandshakeException",
               r"Connection timed out",
               r"OutOfMemoryError",
-              r"not found",
               r"Permission denied",
-              r"Could not install",
+              r"not found",
           ]
 
           matcher = re.compile("|".join(patterns), re.I)
-
           noise = re.compile(
               r"Current runner version|"
               r"Post job cleanup|"
               r"Shutdown hooks complete|"
               r"^\s*#\d+\s|"
-              r"^\s*at\s+.*\([^)]*:\d+:\d+\)\s*$|"
-              r"^\s*\[endgroup\]|"
-              r"^\s*\[group\]",
+              r"^\s*at\s+.*\([^)]*:\d+:\d+\)\s*$",
               re.I,
           )
 
@@ -303,75 +309,78 @@ jobs:
           seen = set()
 
           for i, line in enumerate(lines):
-              if not matcher.search(line):
-                  continue
+              if matcher.search(line):
+                  for item in lines[max(0, i-1):min(len(lines), i+3)]:
+                      item = item.strip()
+                      if item and not noise.search(item) and item not in seen:
+                          seen.add(item)
+                          selected.append(item)
 
-              for item in lines[max(0, i - 1):min(len(lines), i + 3)]:
-                  item = item.strip()
+          outcomes = [
+              ("Download source", download),
+              ("Detect project", project),
+              ("Flutter clean", clean),
+              ("Flutter pub get", pubget),
+              ("Build APK", build),
+          ]
 
-                  if not item or noise.search(item):
-                      continue
+          failed = [(name, status) for name, status in outcomes
+                    if status == "failure"]
 
-                  if item not in seen:
-                      seen.add(item)
-                      selected.append(item)
-
-          if build == "success":
+          if not failed and build == "success":
               content = (
                   "BUILD SUCCESS\n"
                   f"Mode: {mode}\n"
-                  "Build APK selesai.\n"
+                  "APK build selesai.\n"
               )
           else:
               content = (
                   "BUILD FAILED\n"
                   f"Mode: {mode}\n"
-                  f"Download source: {download}\n"
-                  f"Detect project: {project}\n"
-                  f"Build step: {build}\n"
+                  "===== STEP =====\n"
               )
 
-              if failed_stage:
-                  content += f"Failed stage: {failed_stage}\n"
-
-              if exit_code:
-                  content += f"Exit code: {exit_code}\n"
+              if failed:
+                  content += "\n".join(
+                      f"{name}: {status}" for name, status in failed
+                  ) + "\n"
 
               content += "\n===== ERROR UTAMA =====\n"
 
               if selected:
                   content += "\n".join(selected[:35]) + "\n"
-              elif download != "success":
+              elif download == "failure":
                   content += (
-                      "Source ZIP gagal diunduh dari GitHub Release.\n"
-                      "Periksa tag, file ZIP, dan izin repository.\n"
+                      "Gagal mengunduh source ZIP dari GitHub Release.\n"
+                      "Periksa tag, ZIP, dan akses repository.\n"
                   )
-              elif project != "success":
+              elif project == "failure":
                   content += (
-                      "Proyek Flutter gagal dideteksi.\n"
-                      "Pastikan ZIP berisi pubspec.yaml dan folder android.\n"
+                      "Proyek Flutter tidak terdeteksi.\n"
+                      "Pastikan ZIP berisi pubspec.yaml dan android/.\n"
                   )
-              elif raw:
+              elif pubget == "failure":
+                  content += (
+                      "flutter pub get gagal. Periksa dependency "
+                      "dan pubspec.yaml.\n"
+                  )
+              elif clean == "failure":
+                  content += "flutter clean gagal.\n"
+              else:
                   useful = [
                       line.strip() for line in lines
                       if line.strip() and not noise.search(line)
                   ]
                   content += "\n".join(useful[-15:]) + "\n"
-              else:
-                  content += (
-                      "Log proses tidak tersedia.\n"
-                      "Periksa step pertama yang gagal di Actions.\n"
-                  )
 
           marker = b"\n[LOG DIPANGKAS: batas 4 KB]\n"
           data = content.encode("utf-8")
 
           if len(data) > 4096:
               data = (
-                  data[:4096 - len(marker)]
+                  data[:4096-len(marker)]
                   .decode("utf-8", errors="ignore")
-                  .encode("utf-8")
-                  + marker
+                  .encode("utf-8") + marker
               )
 
           with open(report_path, "wb") as f:
