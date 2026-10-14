@@ -27,7 +27,7 @@ jobs:
   build:
     name: Flutter ${{ inputs.build_type }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
 
     env:
       BUILD_TYPE: ${{ inputs.build_type }}
@@ -38,6 +38,40 @@ jobs:
     steps:
       - name: Checkout builder repository
         uses: actions/checkout@v4
+
+      - name: Free disk space (aggressive)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "===== DISK BEFORE ====="
+          df -h /
+
+          # Tool cache raksasa yang gak dipakai untuk Flutter Android
+          sudo rm -rf /usr/share/dotnet          || true
+          sudo rm -rf /usr/local/lib/android/sdk/ndk || true
+          sudo rm -rf /usr/local/lib/android/sdk/cmake || true
+          sudo rm -rf /opt/ghc                   || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf /usr/local/share/boost     || true
+          sudo rm -rf /usr/share/swift           || true
+          sudo rm -rf /usr/local/.ghcup          || true
+          sudo rm -rf /opt/hostedtoolcache/Ruby  || true
+          sudo rm -rf /opt/hostedtoolcache/node  || true
+          sudo rm -rf /opt/hostedtoolcache/go    || true
+          sudo rm -rf /opt/hostedtoolcache/PyPy  || true
+          sudo rm -rf /usr/lib/jvm/*zulu*        || true
+
+          # Docker images & cache
+          sudo docker image prune -af            || true
+          sudo docker system prune -af --volumes || true
+
+          # Apt caches
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*       || true
+
+          # Swap file boleh tetap ada — bantu OOM
+          echo "===== DISK AFTER ====="
+          df -h /
 
       - name: Prepare environment
         shell: bash
@@ -59,10 +93,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "$SOURCE_DIR"
-          {
-            echo ""
-            echo "===== DOWNLOAD SOURCE (tag=$RELEASE_TAG) ====="
-          } >> "$RAW_LOG"
+          { echo ""; echo "===== DOWNLOAD SOURCE (tag=$RELEASE_TAG) ====="; } >> "$RAW_LOG"
 
           gh release download "$RELEASE_TAG" \
             --repo "$REPOSITORY" \
@@ -93,8 +124,7 @@ jobs:
           PUBSPEC="${PUBSPEC_LIST[0]:-}"
           if [ -z "$PUBSPEC" ]; then
             {
-              echo ""
-              echo "===== PROJECT DETECTION FAILED ====="
+              echo ""; echo "===== PROJECT DETECTION FAILED ====="
               echo "pubspec.yaml tidak ditemukan."
               find "$SOURCE_DIR" -maxdepth 3 -print | head -n 100
             } | tee -a "$RAW_LOG"
@@ -103,8 +133,7 @@ jobs:
           PROJECT_ROOT="$(cd "$(dirname "$PUBSPEC")" && pwd)"
           if [ ! -d "$PROJECT_ROOT/android" ]; then
             {
-              echo ""
-              echo "===== PROJECT DETECTION FAILED ====="
+              echo ""; echo "===== PROJECT DETECTION FAILED ====="
               echo "Folder android/ tidak ada di $PROJECT_ROOT"
               ls -la "$PROJECT_ROOT"
             } | tee -a "$RAW_LOG"
@@ -147,7 +176,7 @@ jobs:
           set -e
           if [ "$R" -ne 0 ]; then
             echo "::error::flutter clean gagal (exit=$R)"
-            tail -n 120 "$RAW_LOG"
+            tail -n 200 "$RAW_LOG"
             exit "$R"
           fi
 
@@ -165,7 +194,7 @@ jobs:
           set -e
           if [ "$R" -ne 0 ]; then
             echo "::error::flutter pub get gagal (exit=$R)"
-            tail -n 120 "$RAW_LOG"
+            tail -n 200 "$RAW_LOG"
             exit "$R"
           fi
 
@@ -180,7 +209,11 @@ jobs:
           grep -qxF 'android.newDsl=false' gradle.properties ||
             echo 'android.newDsl=false' >> gradle.properties
           grep -q '^org.gradle.jvmargs=' gradle.properties ||
-            echo 'org.gradle.jvmargs=-Xmx4G' >> gradle.properties
+            echo 'org.gradle.jvmargs=-Xmx4G -XX:MaxMetaspaceSize=1G' >> gradle.properties
+          grep -q '^org.gradle.daemon=' gradle.properties ||
+            echo 'org.gradle.daemon=false' >> gradle.properties
+          grep -q '^org.gradle.parallel=' gradle.properties ||
+            echo 'org.gradle.parallel=true' >> gradle.properties
 
       - name: Build APK
         id: apk_build
@@ -190,16 +223,33 @@ jobs:
         run: |
           set +e
           cd "$PROJECT_ROOT"
-          { echo ""; echo "===== flutter build apk --${BUILD_TYPE} ====="; } >> "$RAW_LOG"
-          flutter build apk --"$BUILD_TYPE" --verbose >> "$RAW_LOG" 2>&1
+
+          { echo ""; echo "===== flutter build apk --${BUILD_TYPE} --verbose ====="; } >> "$RAW_LOG"
+
+          # --verbose BALIK, karena disk udah lega.
+          # Kalau masih ENOSPC, ganti jadi tanpa --verbose.
+          flutter build apk --"$BUILD_TYPE" --verbose \
+            >> "$RAW_LOG" 2>&1
           R=$?
           set -e
+
+          echo "===== BUILD APK EXIT CODE: $R ====="
           if [ "$R" -ne 0 ]; then
             echo "::error::flutter build apk gagal (exit=$R)"
-            echo "===== BUILD APK TAIL ====="
-            tail -n 200 "$RAW_LOG"
             exit "$R"
           fi
+
+      - name: Disk snapshot after build
+        if: always()
+        shell: bash
+        run: |
+          echo "===== DISK AFTER BUILD ====="
+          df -h /
+          echo "===== RAW LOG SIZE ====="
+          ls -lh "$RAW_LOG" || true
+          echo "===== PROJECT DIR SIZE ====="
+          du -sh "$SOURCE_DIR" 2>/dev/null || true
+          du -sh "$GITHUB_WORKSPACE" 2>/dev/null || true
 
       - name: Package APK
         if: success()
@@ -227,17 +277,22 @@ jobs:
           path: ${{ github.workspace }}/apk_output/*.apk
           if-no-files-found: error
           retention-days: 7
+          compression-level: 0
 
-      - name: Persist raw log
+      # ==== Pindahkan raw log ke workspace (full, no cap) ====
+      - name: Move raw log to workspace
         if: always()
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p "$LOG_DIR"
           if [ -f "$RAW_LOG" ]; then
             cp "$RAW_LOG" "$LOG_DIR/raw-build.log"
+            ls -lh "$LOG_DIR/raw-build.log"
+            wc -l "$LOG_DIR/raw-build.log"
           fi
 
-      - name: Generate build report
+      - name: Generate full build report
         if: always()
         shell: bash
         env:
@@ -248,7 +303,7 @@ jobs:
           BUILD_OUTCOME: ${{ steps.apk_build.outcome }}
         run: |
           mkdir -p "$LOG_DIR"
-          python3 - "$RAW_LOG" "$LOG_DIR/build-error.txt" <<'PY'
+          python3 - "$LOG_DIR/raw-build.log" "$LOG_DIR/build-error.txt" <<'PY'
           import os, re, sys
 
           raw_path, report_path = sys.argv[1:3]
@@ -271,7 +326,7 @@ jobs:
           failed = [n for n, s in outcomes if s == "failure"]
           build_ok = os.getenv("BUILD_OUTCOME") == "success"
 
-          # Isolate the Flutter build section (last marker)
+          # Isolate build section
           build_sec = lines
           for i in range(len(lines) - 1, -1, -1):
               if "===== flutter build apk" in lines[i]:
@@ -285,10 +340,8 @@ jobs:
               out = []
               for l in seq:
                   s = l.rstrip()
-                  if not s.strip():
-                      continue
-                  if frame_re.match(s) or note_re.match(s):
-                      continue
+                  if not s.strip(): continue
+                  if frame_re.match(s) or note_re.match(s): continue
                   out.append(s)
               return out
 
@@ -301,20 +354,20 @@ jobs:
 
           sections = []
 
-          # 1) Gradle "What went wrong" block — full block
+          # 1) Full "What went wrong" block — NO LIMIT
           for i, l in enumerate(build_sec):
               if "What went wrong:" in l:
                   end = len(build_sec)
-                  for k in range(i, min(len(build_sec), i + 1200)):
+                  for k in range(i, len(build_sec)):
                       if re.match(r"^BUILD (FAILED|SUCCESSFUL)", build_sec[k]):
                           end = k + 1
                           break
                   blk = clean(build_sec[i:end])
                   if blk:
-                      sections.append(("WHAT WENT WRONG", blk[:500]))
+                      sections.append(("WHAT WENT WRONG (full)", blk))
                   break
 
-          # 2) Dart / Flutter compiler errors
+          # 2) Dart / Flutter compiler errors — NO LIMIT
           dart = []
           for i, l in enumerate(build_sec):
               if re.search(r"^\s*(e|error|Error):", l) or "Error:" in l:
@@ -324,9 +377,9 @@ jobs:
                           dart.append(s)
           dart = dedupe(dart)
           if dart:
-              sections.append(("DART / FLUTTER ERRORS", dart[:200]))
+              sections.append(("DART / FLUTTER ERRORS (full)", dart))
 
-          # 3) Gradle failure points
+          # 3) Gradle failure points — NO LIMIT
           gradle = []
           for i, l in enumerate(build_sec):
               if re.search(
@@ -334,21 +387,25 @@ jobs:
                   r"A problem occurred|Gradle task assemble|"
                   r"> Task .* FAILED|Could not (resolve|find|determine)|"
                   r"Minimum supported Gradle|Unsupported class file|"
-                  r"Duplicate class|requires a higher)", l):
+                  r"Duplicate class|requires a higher|"
+                  r"Android resource linking failed|"
+                  r"Manifest merger failed|"
+                  r"compilation failed|"
+                  r"Daemon|OutOfMemory|Out of memory|"
+                  r"ENOSPC|no space left|No space left on device)", l, re.I):
                   for j in range(max(0, i - 1), min(len(build_sec), i + 4)):
                       s = build_sec[j].rstrip()
                       if s.strip() and not frame_re.match(s):
                           gradle.append(s)
           gradle = dedupe(gradle)
           if gradle:
-              sections.append(("GRADLE FAILURE POINTS", gradle[:200]))
+              sections.append(("GRADLE FAILURE POINTS (full)", gradle))
 
-          # 4) ALWAYS: tail of build log — this guarantees error is visible
-          tail = clean(build_sec)[-150:]
+          # 4) Always: full tail — even if other sections exist
+          tail = clean(build_sec)
           if tail:
-              sections.append(("TAIL OF BUILD LOG (last 150 lines)", tail))
+              sections.append(("FULL BUILD SECTION", tail))
 
-          # Compose
           out = []
           out.append("𝗪𝗘𝗕 𝗧𝗢 𝗔𝗣𝗞 𝗕𝗬 𝗔𝗟𝗗𝗢𝗢")
           out.append("============================")
@@ -366,7 +423,7 @@ jobs:
                   for n in failed:
                       out.append(f"- {n}")
               else:
-                  out.append("- (tidak ada step yang match 'failure'; lihat log di bawah)")
+                  out.append("- (tidak ada step match 'failure')")
               out.append("")
               for title, blk in sections:
                   out.append(f"===== {title} =====")
@@ -379,13 +436,14 @@ jobs:
           with open(report_path, "wb") as f:
               f.write(data)
 
+          # Print ke CI log juga (biar kelihatan langsung)
           print("===== BUILD REPORT BEGIN =====")
           print(content, end="")
           print("===== BUILD REPORT END =====")
-          print(f"Raw log lines: {len(lines)}  Build section lines: {len(build_sec)}  Report bytes: {len(data)}")
+          print(f"Raw log lines: {len(lines)}  Build section: {len(build_sec)}  Report bytes: {len(data)}")
           PY
 
-      - name: Upload build logs
+      - name: Upload build logs (full, no cap)
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -395,3 +453,4 @@ jobs:
             ${{ github.workspace }}/build_logs/raw-build.log
           if-no-files-found: warn
           retention-days: 7
+          compression-level: 0
