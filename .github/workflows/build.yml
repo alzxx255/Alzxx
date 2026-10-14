@@ -215,11 +215,9 @@ jobs:
           project_errors = []
           for line in lines:
               l = line.strip()
-              # BUANG SEMUA noise proses ekstraksi / unzipping / copy file
               if any(noise in l for noise in ["creating:", "inflating:", "Extracting:", "Downloading", "Copying", "package:"]):
                   continue
               
-              # Tangkap baris yang benar-benar indikasi error/kegagalan build
               is_error = any(kw in l for kw in ["Error", "error", "FAILURE", "Exception", "FAILED", "Could not", "Execution failed", "A problem occurred"])
               has_code_error = any(p in l for p in [".dart", "build.gradle", "pubspec.yaml"]) and any(w in l.lower() for w in ["error", "failed", "expected", "undefined", "unresolved", "not found"])
 
@@ -227,30 +225,15 @@ jobs:
                   if l and l not in project_errors:
                       project_errors.append(l)
 
-          project_errors = project_errors[:30]
+          project_errors = project_errors[:20]
 
           if not project_errors:
               content = "❌ BUILD FAILED\n\n(Tidak ada detail error spesifik yang terekam.)\n"
           else:
-              content = "❌ INTI ERROR BUILD APK:\n\n" + "\n".join(f"• {e}" for e in project_errors) + "\n"
+              content = "❌ INTI ERROR BUILD APK:\n\n" + "\n\n".join(f"• {e}" for e in project_errors) + "\n"
 
           with open(report_path, "w", encoding="utf-8") as f:
               f.write(content)
 
           print(content)
           PY
-
-      - name: Send Clean Error Log to Telegram
-        if: failure()
-        shell: bash
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          ERROR_FILE="$LOG_DIR/build-error.txt"
-          if [ -f "$ERROR_FILE" ]; then
-            ERROR_MSG=$(head -c 3000 "$ERROR_FILE")
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-              -d "chat_id=${TELEGRAM_CHAT_ID}" \
-              -d "text=${ERROR_MSG}" || true
-          fi
