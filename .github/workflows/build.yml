@@ -102,11 +102,11 @@ jobs:
 
           ZIP_FILE="$(find . -maxdepth 1 -type f -iname '*.zip' -print -quit)"
           if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: Tidak ada *.zip di release '$RELEASE_TAG'." | tee -a "$RAW_LOG"
+            echo "ERROR: Tidak ada *.zip di release '$RELEASE_TAG'." \vert{} tee -a "$RAW_LOG"
             exit 1
           fi
 
-          echo "Extracting: $ZIP_FILE" | tee -a "$RAW_LOG"
+          echo "Extracting: $ZIP_FILE" \vert{} tee -a "$RAW_LOG"
           unzip -o "$ZIP_FILE" >> "$RAW_LOG" 2>&1
           rm -f "$ZIP_FILE"
 
@@ -226,8 +226,6 @@ jobs:
 
           { echo ""; echo "===== flutter build apk --${BUILD_TYPE} --verbose ====="; } >> "$RAW_LOG"
 
-          # --verbose BALIK, karena disk udah lega.
-          # Kalau masih ENOSPC, ganti jadi tanpa --verbose.
           flutter build apk --"$BUILD_TYPE" --verbose \
             >> "$RAW_LOG" 2>&1
           R=$?
@@ -279,7 +277,6 @@ jobs:
           retention-days: 7
           compression-level: 0
 
-      # ==== Pindahkan raw log ke workspace (full, no cap) ====
       - name: Move raw log to workspace
         if: always()
         shell: bash
@@ -326,7 +323,6 @@ jobs:
           failed = [n for n, s in outcomes if s == "failure"]
           build_ok = os.getenv("BUILD_OUTCOME") == "success"
 
-          # Isolate build section
           build_sec = lines
           for i in range(len(lines) - 1, -1, -1):
               if "===== flutter build apk" in lines[i]:
@@ -354,7 +350,6 @@ jobs:
 
           sections = []
 
-          # 1) Full "What went wrong" block — NO LIMIT
           for i, l in enumerate(build_sec):
               if "What went wrong:" in l:
                   end = len(build_sec)
@@ -367,7 +362,6 @@ jobs:
                       sections.append(("WHAT WENT WRONG (full)", blk))
                   break
 
-          # 2) Dart / Flutter compiler errors — NO LIMIT
           dart = []
           for i, l in enumerate(build_sec):
               if re.search(r"^\s*(e|error|Error):", l) or "Error:" in l:
@@ -379,7 +373,6 @@ jobs:
           if dart:
               sections.append(("DART / FLUTTER ERRORS (full)", dart))
 
-          # 3) Gradle failure points — NO LIMIT
           gradle = []
           for i, l in enumerate(build_sec):
               if re.search(
@@ -401,7 +394,6 @@ jobs:
           if gradle:
               sections.append(("GRADLE FAILURE POINTS (full)", gradle))
 
-          # 4) Always: full tail — even if other sections exist
           tail = clean(build_sec)
           if tail:
               sections.append(("FULL BUILD SECTION", tail))
@@ -436,11 +428,9 @@ jobs:
           with open(report_path, "wb") as f:
               f.write(data)
 
-          # Print ke CI log juga (biar kelihatan langsung)
           print("===== BUILD REPORT BEGIN =====")
           print(content, end="")
           print("===== BUILD REPORT END =====")
-          print(f"Raw log lines: {len(lines)}  Build section: {len(build_sec)}  Report bytes: {len(data)}")
           PY
 
       - name: Upload build logs (full, no cap)
@@ -454,3 +444,25 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
           compression-level: 0
+
+      - name: Send Error Log to Telegram
+        if: failure()
+        shell: bash
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          ERROR_FILE="$LOG_DIR/build-error.txt"
+          if [ -f "$ERROR_FILE" ]; then
+            ERROR_MSG=$(head -c 3500 "$ERROR_FILE")
+            
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d "chat_id=${TELEGRAM_CHAT_ID}" \
+              -d "text=❌ *BUILD APK GAGAL!*%0A%0A\`\`\`text%0A${ERROR_MSG}%0A\`\`\`" \
+              -d "parse_mode=Markdown" || true
+              
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
+              -F "chat_id=${TELEGRAM_CHAT_ID}" \
+              -F "document=@${ERROR_FILE}" \
+              -F "caption=📄 Detail lengkap error log build APK" || true
+          fi
