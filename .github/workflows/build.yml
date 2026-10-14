@@ -1,3 +1,4 @@
+
 name: Flutter APK Builder
 
 on:
@@ -41,7 +42,7 @@ jobs:
       - name: Prepare environment
         shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y unzip gh
           mkdir -p "$SOURCE_DIR" "$LOG_DIR"
@@ -51,46 +52,48 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euxo pipefail
+          set -euo pipefail
           cd "$SOURCE_DIR"
+
           gh release download "${{ inputs.tag }}" \
             --repo "${{ github.repository }}" \
             --pattern "*.zip" \
             --clobber
-          ZIP_FILE="$(find . -maxdepth 1 -type f -iname '*.zip' | head -n 1)"
+
+          ZIP_FILE="$(find . -maxdepth 1 -type f \
+            -iname '*.zip' -print -quit)"
+
           if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: ZIP tidak ditemukan!"
+            echo "ERROR: ZIP source tidak ditemukan!"
             exit 1
           fi
-          echo "Extracting: $ZIP_FILE"
+
           unzip -o "$ZIP_FILE"
           rm -f "$ZIP_FILE"
-          echo "✅ ZIP Extracted!"
 
-      # ✅ CARI PUBSPEC — TANPA PIPE, PASTI JALAN WALAU ADA FOLDER TAMBAHAN! ✅
       - name: Detect Flutter project
         id: project
         shell: bash
         run: |
           set -euo pipefail
-          echo "🔍 Mencari pubspec.yaml..."
-          
-          mapfile -t PUBSPEC_LIST < <(find "$SOURCE_DIR" -type f -name "pubspec.yaml" \
-            -not -path "*/build/*" -not -path "*/.git/*" -not -path "*/.pub/*")
-          
+
+          mapfile -t PUBSPEC_LIST < <(
+            find "$SOURCE_DIR" -type f -name "pubspec.yaml" \
+              -not -path "*/build/*" \
+              -not -path "*/.git/*" \
+              -not -path "*/.pub/*"
+          )
+
           PUBSPEC="${PUBSPEC_LIST[0]:-}"
 
           if [ -z "$PUBSPEC" ]; then
-            echo "❌ ERROR: pubspec.yaml TIDAK DITEMUKAN!"
-            echo "📂 Isi folder SOURCE_DIR:"
-            ls -la "$SOURCE_DIR"
-            echo "📂 Daftar folder:"
-            find "$SOURCE_DIR" -maxdepth 2 -type d | head -n 20
+            echo "ERROR: pubspec.yaml tidak ditemukan."
+            find "$SOURCE_DIR" -maxdepth 3 -type f \
+              -name "pubspec.yaml" -print
             exit 1
           fi
 
           PROJECT_ROOT="$(cd "$(dirname "$PUBSPEC")" && pwd)"
-          echo "✅ Project ditemukan di: $PROJECT_ROOT"
           echo "project_root=$PROJECT_ROOT" >> "$GITHUB_OUTPUT"
 
       - name: Setup Java 17
@@ -99,16 +102,17 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      # ✅ Flutter 3.32.8 — Dart 3.8.1, kompatibel dengan Gradle 8.12 project ini ✅
-      - name: Setup Flutter — Stable Release
+      - name: Setup Flutter 3.32.8
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.32.8'
+          flutter-version: "3.32.8"
           channel: stable
           cache: true
 
       - name: Flutter environment check
+        shell: bash
         run: |
+          set -euo pipefail
           flutter --version
           dart --version
           flutter doctor -v
@@ -124,23 +128,198 @@ jobs:
       - name: Fix Gradle Compatibility
         shell: bash
         run: |
+          set -euo pipefail
           cd "${{ steps.project.outputs.project_root }}/android"
-          echo "android.newDsl=false" >> gradle.properties
-          echo "org.gradle.jvmargs=-Xmx4G" >> gradle.properties
+
+          touch gradle.properties
+
+          grep -qxF 'android.newDsl=false' gradle.properties ||
+            echo 'android.newDsl=false' >> gradle.properties
+
+          grep -q '^org.gradle.jvmargs=' gradle.properties ||
+            echo 'org.gradle.jvmargs=-Xmx4G' >> gradle.properties
 
       - name: Build APK
+        id: apk_build
         shell: bash
         run: |
-          set -o pipefail
-          cd "${{ steps.project.outputs.project_root }}"
-          flutter build apk --${{ inputs.build_type }} --verbose
+          set +e
+
+          PROJECT_ROOT="${{ steps.project.outputs.project_root }}"
+          RAW_LOG="$RUNNER_TEMP/flutter-build-full.log"
+          REPORT="$LOG_DIR/build-error.txt"
+
+          mkdir -p "$LOG_DIR"
+
+          cd "$PROJECT_ROOT"
+
+          flutter build apk --"$BUILD_TYPE" --verbose \
+            > "$RAW_LOG" 2>&1
+
+          BUILD_EXIT_CODE=$?
+
+          set -e
+          export BUILD_EXIT_CODE
+
+          python3 - "$RAW_LOG" "$REPORT" <<'PY'
+          import os
+          import re
+          import sys
+
+          raw_path, report_path = sys.argv[1:3]
+          exit_code = int(os.environ["BUILD_EXIT_CODE"])
+
+          try:
+              with open(raw_path, "r", encoding="utf-8",
+                        errors="replace") as f:
+                  lines = f.read().splitlines()
+          except OSError:
+              lines = []
+
+          # Prioritaskan pesan error, bukan stack trace atau runner log.
+          patterns = [
+              re.compile(
+                  r"FAILURE: Build failed|What went wrong:|"
+                  r"Execution failed for task|"
+                  r"Manifest merger failed|"
+                  r"Could not resolve|"
+                  r"Could not find|"
+                  r"Target of URI doesn't exist|"
+                  r"Because .+ depends on|"
+                  r"pub get failed|"
+                  r"Compilation failed|"
+                  r"BUILD FAILED",
+                  re.I,
+              ),
+              re.compile(
+                  r"(^|\]\s*)(Error:|error:|e: |"
+                  r"Exception:|Caused by:|"
+                  r"A problem occurred|"
+                  r"Unable to|Failed to|"
+                  r"Unresolved reference|"
+                  r"requires a higher|"
+                  r"Minimum supported Gradle|"
+                  r"Unsupported class file|"
+                  r"Could not install|"
+                  r"not found|"
+                  r"already defined|"
+                  r"Expected .+ but found|"
+                  r"Invalid depfile)",
+                  re.I,
+              ),
+          ]
+
+          selected = []
+          seen = set()
+
+          for pattern in patterns:
+              for index, line in enumerate(lines):
+                  if pattern.search(line):
+                      # Sertakan konteks dekat error jika tersedia.
+                      start = max(0, index - 1)
+                      end = min(len(lines), index + 3)
+
+                      for context_line in lines[start:end]:
+                          value = context_line.strip()
+
+                          if not value or value in seen:
+                              continue
+
+                          if re.search(
+                              r"Current runner version|"
+                              r"Post job cleanup|"
+                              r"Shutdown hooks complete|"
+                              r"^\s*#\d+\s",
+                              value,
+                              re.I,
+                          ):
+                              continue
+
+                          seen.add(value)
+                          selected.append(value)
+
+          if exit_code == 0:
+              content = (
+                  "BUILD SUCCESS\n"
+                  "Status: APK berhasil dibuat.\n"
+                  "Mode: " + os.environ.get("BUILD_TYPE", "unknown")
+                  + "\n"
+              )
+          else:
+              content = (
+                  "BUILD FAILED\n"
+                  "Step: Build APK\n"
+                  "Mode: " + os.environ.get("BUILD_TYPE", "unknown")
+                  + "\n\n"
+                  "===== ERROR UTAMA =====\n"
+              )
+
+              if selected:
+                  content += "\n".join(selected[:45]) + "\n"
+              else:
+                  # Fallback jika format error tidak dikenali.
+                  useful = [
+                      line.strip() for line in lines
+                      if line.strip()
+                      and not re.search(
+                          r"Current runner version|"
+                          r"Post job cleanup|"
+                          r"Shutdown hooks complete|"
+                          r"^\s*#\d+\s",
+                          line,
+                          re.I,
+                      )
+                  ]
+                  content += (
+                      "\n".join(useful[-20:])
+                      if useful else
+                      "Penyebab error tidak ditemukan dalam log."
+                  )
+                  content += "\n"
+
+          # Batas keras 4096 byte, termasuk karakter UTF-8.
+          encoded = content.encode("utf-8")
+          if len(encoded) > 4096:
+              suffix = b"\n[Log dipangkas: batas 4 KB]\n"
+              encoded = encoded[:4096 - len(suffix)]
+              encoded = encoded.decode(
+                  "utf-8", errors="ignore"
+              ).encode("utf-8") + suffix
+
+          with open(report_path, "wb") as f:
+              f.write(encoded)
+
+          print(content[:3500])
+          print(
+              "\nLaporan: {} byte".format(
+                  os.path.getsize(report_path)
+              )
+          )
+          PY
+
+          if [ "$BUILD_EXIT_CODE" -ne 0 ]; then
+            exit "$BUILD_EXIT_CODE"
+          fi
 
       - name: Package APK
         if: success()
         shell: bash
         run: |
+          set -euo pipefail
+
+          APK_DIR="${{ steps.project.outputs.project_root }}/build/app/outputs/flutter-apk"
+
           mkdir -p "$GITHUB_WORKSPACE/apk_output"
-          find "${{ steps.project.outputs.project_root }}/build/app/outputs/flutter-apk" -name "*.apk" -exec cp {} "$GITHUB_WORKSPACE/apk_output/" \;
+
+          find "$APK_DIR" -maxdepth 1 -type f -name "*.apk" \
+            -exec cp {} "$GITHUB_WORKSPACE/apk_output/" \;
+
+          if ! find "$GITHUB_WORKSPACE/apk_output" \
+            -maxdepth 1 -type f -name "*.apk" | grep -q .; then
+            echo "ERROR: APK tidak ditemukan setelah build."
+            exit 1
+          fi
+
           ls -lh "$GITHUB_WORKSPACE/apk_output"
 
       - name: Upload APK
@@ -151,10 +330,45 @@ jobs:
           path: ${{ github.workspace }}/apk_output/*.apk
           if-no-files-found: error
 
-      - name: Upload build logs
+      - name: Ensure failure report exists
+        if: always()
+        shell: bash
+        env:
+          BUILD_STEP_OUTCOME: ${{ steps.apk_build.outcome }}
+          PROJECT_STEP_OUTCOME: ${{ steps.project.outcome }}
+        run: |
+          mkdir -p "$LOG_DIR"
+
+          if [ ! -f "$LOG_DIR/build-error.txt" ]; then
+            {
+              echo "BUILD FAILED"
+              echo "Mode: $BUILD_TYPE"
+              echo ""
+              echo "Build berhenti sebelum laporan Build APK tersedia."
+              echo "Detect project: ${PROJECT_STEP_OUTCOME:-unknown}"
+              echo "Build APK step: ${BUILD_STEP_OUTCOME:-not-run}"
+              echo ""
+              echo "Periksa step pertama yang gagal di GitHub Actions."
+            } > "$LOG_DIR/build-error.txt"
+          fi
+
+          # Batas 4096 byte juga untuk kegagalan sebelum build.
+          python3 - "$LOG_DIR/build-error.txt" <<'PY'
+          import sys
+
+          path = sys.argv[1]
+          with open(path, "rb") as f:
+              data = f.read(4096)
+
+          with open(path, "wb") as f:
+              f.write(data)
+          PY
+
+      - name: Upload build error report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-log-${{ inputs.build_type }}
-          path: ${{ github.workspace }}/build_logs/**
-          if-no-files-found: warn
+          path: ${{ github.workspace }}/build_logs/build-error.txt
+          if-no-files-found: error
+          retention-days: 7
