@@ -45,8 +45,6 @@ jobs:
           set -euo pipefail
           echo "===== DISK BEFORE ====="
           df -h /
-
-          # Tool cache raksasa yang gak dipakai untuk Flutter Android
           sudo rm -rf /usr/share/dotnet          || true
           sudo rm -rf /usr/local/lib/android/sdk/ndk || true
           sudo rm -rf /usr/local/lib/android/sdk/cmake || true
@@ -60,16 +58,10 @@ jobs:
           sudo rm -rf /opt/hostedtoolcache/go    || true
           sudo rm -rf /opt/hostedtoolcache/PyPy  || true
           sudo rm -rf /usr/lib/jvm/*zulu*        || true
-
-          # Docker images & cache
           sudo docker image prune -af            || true
           sudo docker system prune -af --volumes || true
-
-          # Apt caches
           sudo apt-get clean
           sudo rm -rf /var/lib/apt/lists/*       || true
-
-          # Swap file boleh tetap ada — bantu OOM
           echo "===== DISK AFTER ====="
           df -h /
 
@@ -93,20 +85,15 @@ jobs:
         run: |
           set -euo pipefail
           cd "$SOURCE_DIR"
-          { echo ""; echo "===== DOWNLOAD SOURCE (tag=$RELEASE_TAG) ====="; } >> "$RAW_LOG"
-
           gh release download "$RELEASE_TAG" \
             --repo "$REPOSITORY" \
             --pattern "*.zip" \
             --clobber >> "$RAW_LOG" 2>&1
-
           ZIP_FILE="$(find . -maxdepth 1 -type f -iname '*.zip' -print -quit)"
           if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: Tidak ada *.zip di release '$RELEASE_TAG'." \vert{} tee -a "$RAW_LOG"
+            echo "ERROR: Tidak ada *.zip di release '$RELEASE_TAG'." | tee -a "$RAW_LOG"
             exit 1
           fi
-
-          echo "Extracting: $ZIP_FILE" \vert{} tee -a "$RAW_LOG"
           unzip -o "$ZIP_FILE" >> "$RAW_LOG" 2>&1
           rm -f "$ZIP_FILE"
 
@@ -123,20 +110,12 @@ jobs:
           )
           PUBSPEC="${PUBSPEC_LIST[0]:-}"
           if [ -z "$PUBSPEC" ]; then
-            {
-              echo ""; echo "===== PROJECT DETECTION FAILED ====="
-              echo "pubspec.yaml tidak ditemukan."
-              find "$SOURCE_DIR" -maxdepth 3 -print | head -n 100
-            } | tee -a "$RAW_LOG"
+            echo "pubspec.yaml tidak ditemukan." | tee -a "$RAW_LOG"
             exit 1
           fi
           PROJECT_ROOT="$(cd "$(dirname "$PUBSPEC")" && pwd)"
           if [ ! -d "$PROJECT_ROOT/android" ]; then
-            {
-              echo ""; echo "===== PROJECT DETECTION FAILED ====="
-              echo "Folder android/ tidak ada di $PROJECT_ROOT"
-              ls -la "$PROJECT_ROOT"
-            } | tee -a "$RAW_LOG"
+            echo "Folder android/ tidak ada di $PROJECT_ROOT" | tee -a "$RAW_LOG"
             exit 1
           fi
           echo "project_root=$PROJECT_ROOT" >> "$GITHUB_OUTPUT"
@@ -154,14 +133,6 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Flutter environment check
-        shell: bash
-        run: |
-          set -euo pipefail
-          { echo ""; echo "===== FLUTTER ENV ====="; } >> "$RAW_LOG"
-          flutter --version 2>&1 | tee -a "$RAW_LOG"
-          dart --version 2>&1 | tee -a "$RAW_LOG"
-
       - name: Flutter clean
         id: clean
         shell: bash
@@ -170,15 +141,7 @@ jobs:
         run: |
           set +e
           cd "$PROJECT_ROOT"
-          { echo ""; echo "===== flutter clean ====="; } >> "$RAW_LOG"
           flutter clean >> "$RAW_LOG" 2>&1
-          R=$?
-          set -e
-          if [ "$R" -ne 0 ]; then
-            echo "::error::flutter clean gagal (exit=$R)"
-            tail -n 200 "$RAW_LOG"
-            exit "$R"
-          fi
 
       - name: Flutter pub get
         id: pubget
@@ -188,15 +151,7 @@ jobs:
         run: |
           set +e
           cd "$PROJECT_ROOT"
-          { echo ""; echo "===== flutter pub get ====="; } >> "$RAW_LOG"
           flutter pub get >> "$RAW_LOG" 2>&1
-          R=$?
-          set -e
-          if [ "$R" -ne 0 ]; then
-            echo "::error::flutter pub get gagal (exit=$R)"
-            tail -n 200 "$RAW_LOG"
-            exit "$R"
-          fi
 
       - name: Fix Gradle Compatibility
         shell: bash
@@ -206,14 +161,8 @@ jobs:
           set -euo pipefail
           cd "$PROJECT_ROOT/android"
           touch gradle.properties
-          grep -qxF 'android.newDsl=false' gradle.properties ||
-            echo 'android.newDsl=false' >> gradle.properties
-          grep -q '^org.gradle.jvmargs=' gradle.properties ||
-            echo 'org.gradle.jvmargs=-Xmx4G -XX:MaxMetaspaceSize=1G' >> gradle.properties
-          grep -q '^org.gradle.daemon=' gradle.properties ||
-            echo 'org.gradle.daemon=false' >> gradle.properties
-          grep -q '^org.gradle.parallel=' gradle.properties ||
-            echo 'org.gradle.parallel=true' >> gradle.properties
+          grep -qxF 'android.newDsl=false' gradle.properties || echo 'android.newDsl=false' >> gradle.properties
+          grep -q '^org.gradle.jvmargs=' gradle.properties || echo 'org.gradle.jvmargs=-Xmx4G -XX:MaxMetaspaceSize=1G' >> gradle.properties
 
       - name: Build APK
         id: apk_build
@@ -223,31 +172,8 @@ jobs:
         run: |
           set +e
           cd "$PROJECT_ROOT"
-
-          { echo ""; echo "===== flutter build apk --${BUILD_TYPE} --verbose ====="; } >> "$RAW_LOG"
-
-          flutter build apk --"$BUILD_TYPE" --verbose \
-            >> "$RAW_LOG" 2>&1
-          R=$?
-          set -e
-
-          echo "===== BUILD APK EXIT CODE: $R ====="
-          if [ "$R" -ne 0 ]; then
-            echo "::error::flutter build apk gagal (exit=$R)"
-            exit "$R"
-          fi
-
-      - name: Disk snapshot after build
-        if: always()
-        shell: bash
-        run: |
-          echo "===== DISK AFTER BUILD ====="
-          df -h /
-          echo "===== RAW LOG SIZE ====="
-          ls -lh "$RAW_LOG" || true
-          echo "===== PROJECT DIR SIZE ====="
-          du -sh "$SOURCE_DIR" 2>/dev/null || true
-          du -sh "$GITHUB_WORKSPACE" 2>/dev/null || true
+          flutter build apk --"$BUILD_TYPE" >> "$RAW_LOG" 2>&1
+          exit $?
 
       - name: Package APK
         if: success()
@@ -259,13 +185,7 @@ jobs:
           APK_DIR="$PROJECT_ROOT/build/app/outputs/flutter-apk"
           OUTPUT_DIR="$GITHUB_WORKSPACE/apk_output"
           mkdir -p "$OUTPUT_DIR"
-          find "$APK_DIR" -maxdepth 1 -type f -name "*.apk" \
-            -exec cp {} "$OUTPUT_DIR/" \;
-          if ! find "$OUTPUT_DIR" -maxdepth 1 -type f -name "*.apk" | grep -q .; then
-            echo "::error::APK tidak ditemukan setelah build sukses."
-            exit 1
-          fi
-          ls -lh "$OUTPUT_DIR"
+          find "$APK_DIR" -maxdepth 1 -type f -name "*.apk" -exec cp {} "$OUTPUT_DIR/" \;
 
       - name: Upload APK
         if: success()
@@ -277,175 +197,42 @@ jobs:
           retention-days: 7
           compression-level: 0
 
-      - name: Move raw log to workspace
+      - name: Generate Clean Core Error Report
         if: always()
         shell: bash
         run: |
-          set -euo pipefail
           mkdir -p "$LOG_DIR"
-          if [ -f "$RAW_LOG" ]; then
-            cp "$RAW_LOG" "$LOG_DIR/raw-build.log"
-            ls -lh "$LOG_DIR/raw-build.log"
-            wc -l "$LOG_DIR/raw-build.log"
-          fi
-
-      - name: Generate full build report
-        if: always()
-        shell: bash
-        env:
-          DOWNLOAD_OUTCOME: ${{ steps.download.outcome }}
-          PROJECT_OUTCOME: ${{ steps.project.outcome }}
-          CLEAN_OUTCOME: ${{ steps.clean.outcome }}
-          PUBGET_OUTCOME: ${{ steps.pubget.outcome }}
-          BUILD_OUTCOME: ${{ steps.apk_build.outcome }}
-        run: |
-          mkdir -p "$LOG_DIR"
-          python3 - "$LOG_DIR/raw-build.log" "$LOG_DIR/build-error.txt" <<'PY'
+          python3 - "/tmp/flutter-build-full.log" "$LOG_DIR/build-error.txt" <<'PY'
           import os, re, sys
 
           raw_path, report_path = sys.argv[1:3]
           try:
               with open(raw_path, encoding="utf-8", errors="replace") as f:
-                  raw = f.read()
+                  lines = f.readlines()
           except OSError:
-              raw = ""
+              lines = []
 
-          lines = raw.splitlines()
-          mode = os.getenv("BUILD_TYPE", "unknown")
+          project_errors = []
+          for line in lines:
+              l = line.strip()
+              if any(keyword in l for keyword in ["Error:", "error:", "FAILURE:", "Exception:", "lib/", "android/", "pubspec.yaml"]):
+                  if l and not l.startswith("package:") and l not in project_errors:
+                      project_errors.append(l)
 
-          outcomes = [
-              ("Download source", os.getenv("DOWNLOAD_OUTCOME", "unknown")),
-              ("Detect project",  os.getenv("PROJECT_OUTCOME",  "unknown")),
-              ("Flutter clean",   os.getenv("CLEAN_OUTCOME",    "unknown")),
-              ("Flutter pub get", os.getenv("PUBGET_OUTCOME",   "unknown")),
-              ("Build APK",       os.getenv("BUILD_OUTCOME",    "unknown")),
-          ]
-          failed = [n for n, s in outcomes if s == "failure"]
-          build_ok = os.getenv("BUILD_OUTCOME") == "success"
+          project_errors = project_errors[:35]
 
-          build_sec = lines
-          for i in range(len(lines) - 1, -1, -1):
-              if "===== flutter build apk" in lines[i]:
-                  build_sec = lines[i:]
-                  break
-
-          frame_re = re.compile(r"^\s*at\s+[\w.$<>/()]+")
-          note_re  = re.compile(r"^\s*Note:\s", re.I)
-
-          def clean(seq):
-              out = []
-              for l in seq:
-                  s = l.rstrip()
-                  if not s.strip(): continue
-                  if frame_re.match(s) or note_re.match(s): continue
-                  out.append(s)
-              return out
-
-          def dedupe(seq):
-              seen = set(); out = []
-              for x in seq:
-                  if x not in seen:
-                      seen.add(x); out.append(x)
-              return out
-
-          sections = []
-
-          for i, l in enumerate(build_sec):
-              if "What went wrong:" in l:
-                  end = len(build_sec)
-                  for k in range(i, len(build_sec)):
-                      if re.match(r"^BUILD (FAILED|SUCCESSFUL)", build_sec[k]):
-                          end = k + 1
-                          break
-                  blk = clean(build_sec[i:end])
-                  if blk:
-                      sections.append(("WHAT WENT WRONG (full)", blk))
-                  break
-
-          dart = []
-          for i, l in enumerate(build_sec):
-              if re.search(r"^\s*(e|error|Error):", l) or "Error:" in l:
-                  for j in range(max(0, i - 1), min(len(build_sec), i + 3)):
-                      s = build_sec[j].rstrip()
-                      if s.strip() and not frame_re.match(s):
-                          dart.append(s)
-          dart = dedupe(dart)
-          if dart:
-              sections.append(("DART / FLUTTER ERRORS (full)", dart))
-
-          gradle = []
-          for i, l in enumerate(build_sec):
-              if re.search(
-                  r"(FAILURE:\s*Build|Execution failed for task|"
-                  r"A problem occurred|Gradle task assemble|"
-                  r"> Task .* FAILED|Could not (resolve|find|determine)|"
-                  r"Minimum supported Gradle|Unsupported class file|"
-                  r"Duplicate class|requires a higher|"
-                  r"Android resource linking failed|"
-                  r"Manifest merger failed|"
-                  r"compilation failed|"
-                  r"Daemon|OutOfMemory|Out of memory|"
-                  r"ENOSPC|no space left|No space left on device)", l, re.I):
-                  for j in range(max(0, i - 1), min(len(build_sec), i + 4)):
-                      s = build_sec[j].rstrip()
-                      if s.strip() and not frame_re.match(s):
-                          gradle.append(s)
-          gradle = dedupe(gradle)
-          if gradle:
-              sections.append(("GRADLE FAILURE POINTS (full)", gradle))
-
-          tail = clean(build_sec)
-          if tail:
-              sections.append(("FULL BUILD SECTION", tail))
-
-          out = []
-          out.append("𝗪𝗘𝗕 𝗧𝗢 𝗔𝗣𝗞 𝗕𝗬 𝗔𝗟𝗗𝗢𝗢")
-          out.append("============================")
-          out.append("")
-          if build_ok and not failed:
-              out.append("BUILD SUCCESS")
-              out.append(f"Mode: {mode}")
-              out.append("APK build selesai tanpa error.")
+          if not project_errors:
+              content = "❌ BUILD FAILED\n\n(Tidak ada detail error spesifik yang terekam.)\n"
           else:
-              out.append("BUILD FAILED")
-              out.append(f"Mode: {mode}")
-              out.append("")
-              out.append("===== STEP YANG GAGAL =====")
-              if failed:
-                  for n in failed:
-                      out.append(f"- {n}")
-              else:
-                  out.append("- (tidak ada step match 'failure')")
-              out.append("")
-              for title, blk in sections:
-                  out.append(f"===== {title} =====")
-                  out.extend(blk)
-                  out.append("")
+              content = "❌ ERROR PADA PROYEK (lib / android / pubspec):\n\n" + "\n".join(f"• {e}" for e in project_errors) + "\n"
 
-          content = "\n".join(out).rstrip() + "\n"
-          data = content.encode("utf-8")
+          with open(report_path, "w", encoding="utf-8") as f:
+              f.write(content)
 
-          with open(report_path, "wb") as f:
-              f.write(data)
-
-          print("===== BUILD REPORT BEGIN =====")
-          print(content, end="")
-          print("===== BUILD REPORT END =====")
+          print(content)
           PY
 
-      - name: Upload build logs (full, no cap)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-logs-${{ inputs.build_type }}
-          path: |
-            ${{ github.workspace }}/build_logs/build-error.txt
-            ${{ github.workspace }}/build_logs/raw-build.log
-          if-no-files-found: warn
-          retention-days: 7
-          compression-level: 0
-
-      - name: Send Error Log to Telegram
+      - name: Send Clean Error Log to Telegram
         if: failure()
         shell: bash
         env:
@@ -454,15 +241,8 @@ jobs:
         run: |
           ERROR_FILE="$LOG_DIR/build-error.txt"
           if [ -f "$ERROR_FILE" ]; then
-            ERROR_MSG=$(head -c 3500 "$ERROR_FILE")
-            
+            ERROR_MSG=$(head -c 3000 "$ERROR_FILE")
             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               -d "chat_id=${TELEGRAM_CHAT_ID}" \
-              -d "text=❌ *BUILD APK GAGAL!*%0A%0A\`\`\`text%0A${ERROR_MSG}%0A\`\`\`" \
-              -d "parse_mode=Markdown" || true
-              
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
-              -F "chat_id=${TELEGRAM_CHAT_ID}" \
-              -F "document=@${ERROR_FILE}" \
-              -F "caption=📄 Detail lengkap error log build APK" || true
+              -d "text=${ERROR_MSG}" || true
           fi
